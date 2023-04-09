@@ -14,7 +14,7 @@ import argparse
 import json
 import os
 import time
-from bisect import bisect_left, bisect_right
+from bisect import bisect_left
 from datetime import datetime
 from fractions import Fraction
 
