@@ -11,19 +11,17 @@
 #   -t TIME, --time TIME  Hours of tolerance.
 
 import argparse
-import datetime
-import glob
 import json
 import os
 import time
 from bisect import bisect_left, bisect_right
+from datetime import datetime
 from fractions import Fraction
 
 import piexif
-
-# from pexif import JpegFile
 from PIL import Image
 
+# from pexif import JpegFile
 # Exif copyright data, modify it here and it'll be written to every picture
 #
 #
@@ -31,20 +29,21 @@ from PIL import Image
 
 class Location(object):
     def __init__(self, d={}):
-        self.timestamp = None
-        self.latitude = None
-        self.longitude = None
-        self.altitude = 0
+        self.timestamp = self.get_timestamp(d.get("timestamp", None))
+        self.latitude = d.get("latitudeE7", None)
+        self.longitude = d.get("longitudeE7", None)
+        self.altitude = d.get("altitude", 0)
 
-        for key in d:
-            if key == "timestampMs":
-                self.timestamp = int(d[key]) / 1000
-            elif key == "latitudeE7":
-                self.latitude = d[key]
-            elif key == "longitudeE7":
-                self.longitude = d[key]
-            elif key == "altitude":
-                self.altitude = d[key]
+    def get_timestamp(self, timestamp):
+        if timestamp is None:
+            return None
+        str_formats = ["%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"]
+        for str_format in str_formats:
+            try:
+                return datetime.strptime(timestamp, str_format).timestamp()
+            except ValueError:
+                pass
+        raise ValueError("No valid date format found.")
 
     def __eq__(self, other):
         return self.timestamp == other.timestamp
@@ -75,14 +74,11 @@ def find_closest_in_time(locations, a_location):
     before = locations[pos - 1]
     after = locations[pos]
 
+    # Checks if the timestamp is closest to the timestamp before or after
     if after.timestamp - a_location.timestamp < a_location.timestamp - before.timestamp:
         return after
     else:
         return before
-
-
-def print_epoch(epoch_time):
-    print(datetime.datetime.fromtimestamp(epoch_time).strftime("%Y:%m:%d %H:%M:%S"))
 
 
 # https://gist.github.com/c060604/8a51f8999be12fc2be498e9ca56adc72
@@ -108,7 +104,7 @@ def to_deg(value, loc):
 
 
 def change_to_rational(number):
-    """convert a number to rantional
+    """convert a number to rational
     Keyword arguments: number
     return: tuple like (1, 2), (numerator, denominator)
     """
@@ -144,10 +140,8 @@ for location in location_array:
     a_location = Location(location)
     my_locations.append(a_location)
 
-# print('Reversing locations list')
-# my_locations = list(reversed(my_locations))
 my_locations = list(my_locations)
-print("Sorting locations list")
+print("Finished creating locations list")
 
 included_extenstions = ["jpg", "JPG", "jpeg", "JPEG"]
 file_names = [
@@ -155,17 +149,21 @@ file_names = [
     for fn in os.listdir(image_dir)
     if any(fn.endswith(ext) for ext in included_extenstions)
 ]
+print(f"file names: {file_names}")
 
 for image_file in file_names:
     image_file = os.path.join(image_dir, image_file)
     image = Image.open(image_file)
-    time_exif = image._getexif()[36867]
-    time_str = datetime.datetime.strptime(time_exif, "%Y:%m:%d %H:%M:%S")
+    time_exif_str = image._getexif()[
+        36867
+    ]  # 36867 is the EXIF tag for DateTimeOriginal
+    time_str = datetime.strptime(time_exif_str, "%Y:%m:%d %H:%M:%S")
     time_jpeg_unix = time.mktime(
-        datetime.datetime.strptime(time_exif, "%Y:%m:%d %H:%M:%S").timetuple()
+        datetime.strptime(time_exif_str, "%Y:%m:%d %H:%M:%S").timetuple()
     )
     curr_loc = Location()
     curr_loc.timestamp = int(time_jpeg_unix)
+    # Getting to here
     approx_location = find_closest_in_time(my_locations, curr_loc)
     hours_away = abs(approx_location.timestamp - time_jpeg_unix) / 3600
 
@@ -202,5 +200,3 @@ for image_file in file_names:
 
         exif_bytes = piexif.dump(exif_dict)
         image.save(image_file, exif=exif_bytes)
-    # else:
-    # print 'Time threshold surpassed'
