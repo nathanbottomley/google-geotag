@@ -21,17 +21,14 @@ from fractions import Fraction
 import piexif
 from PIL import Image
 
-# from pexif import JpegFile
-# Exif copyright data, modify it here and it'll be written to every picture
-#
-#
-
 
 class Location(object):
-    def __init__(self, d={}):
-        self.timestamp = self.get_timestamp(d.get("timestamp", None))
-        self.latitude = d.get("latitudeE7", None)
-        self.longitude = d.get("longitudeE7", None)
+    def __init__(self, d: dict = None):
+        if d is None:
+            d = {}
+        self.timestamp = self.get_timestamp(d.get("timestamp"))
+        self.latitude = d.get("latitudeE7")
+        self.longitude = d.get("longitudeE7")
         self.altitude = d.get("altitude", 0)
 
     def get_timestamp(self, timestamp):
@@ -133,7 +130,7 @@ with open(locations_file) as f:
     location_data = json.load(f)
 
 location_array = location_data["locations"]
-print("Found %s locations" % len(location_array))
+print(f"Found {len(location_array)} locations")
 
 my_locations = []
 for location in location_array:
