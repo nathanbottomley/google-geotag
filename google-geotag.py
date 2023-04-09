@@ -1,8 +1,7 @@
-#
 # Geotagging using Google location history.
 #
 # Command
-# python google-geotag.py --dir {your photos directory} --json {your location history}
+# python google-geotag.py --dir {photos directory} --json {location history json file}
 #
 # Input parameters:
 #
