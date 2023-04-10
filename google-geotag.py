@@ -41,23 +41,8 @@ class Location(object):
                 pass
         raise ValueError("No valid date format found.")
 
-    def __eq__(self, other):
-        return self.timestamp == other.timestamp
-
     def __lt__(self, other):
         return self.timestamp < other.timestamp
-
-    def __le__(self, other):
-        return self.timestamp <= other.timestamp
-
-    def __gt__(self, other):
-        return self.timestamp > other.timestamp
-
-    def __ge__(self, other):
-        return self.timestamp >= other.timestamp
-
-    def __ne__(self, other):
-        return self.timestamp != other.timestamp
 
 
 def find_closest_in_time(locations, a_location):
