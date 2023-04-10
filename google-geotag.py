@@ -57,50 +57,64 @@ class Location(object):
         return self.timestamp < other.timestamp
 
 
-def find_closest_in_time(locations: List[Location], a_location: Location) -> Location:
-    pos = bisect_left(locations, a_location)
+def find_closest_location_in_time(
+    locations: List[Location], image_location: Location
+) -> Location:
+    pos = bisect_left(locations, image_location)
     if pos == 0:
         return locations[0]
     if pos == len(locations):
         return locations[-1]
     before = locations[pos - 1]
     after = locations[pos]
-    if after.timestamp - a_location.timestamp < a_location.timestamp - before.timestamp:
+    if (
+        after.timestamp - image_location.timestamp
+        < image_location.timestamp - before.timestamp
+    ):
         return after
     else:
         return before
 
 
-def to_deg(value, loc):
-    """convert decimal coordinates into degrees, minutes and seconds tuple
-    Keyword arguments: value is float gps-value, loc is direction list ["S", "N"] or ["W", "E"]
-    return: tuple like (25, 13, 48.343 ,'N')
+def to_deg(
+    decimal_coordinate: float, cardinal_direction_choices: List[str]
+) -> Tuple[int, int, float, str]:
     """
-    # 1. Check if the value is negative or positive
-    if value < 0:
-        loc_value = loc[0]
-    elif value > 0:
-        loc_value = loc[1]
+    Convert decimal coordinates into degrees, minutes and seconds tuple
+    Keyword arguments:
+        decimal_coordinate: float gps-value
+        cardinal_direction_choices: ["S", "N"] or ["W", "E"]
+    Return:
+        tuple like (25, 13, 48.343 ,'N')
+    """
+    # 1. Get cardinal direction from if the coordinate is negative or positive
+    if decimal_coordinate < 0:
+        cardinal_direction = cardinal_direction_choices[0]
+    elif decimal_coordinate > 0:
+        cardinal_direction = cardinal_direction_choices[1]
     else:
-        loc_value = ""
+        cardinal_direction = ""
 
-    # 2. Get the absolute value of the value
-    abs_value = abs(value)
-    deg = int(abs_value)
+    # 2. Get degrees as the integer part of the absolute value
+    degrees = int(abs(decimal_coordinate))
 
-    # 3. Convert the value into minutes
-    t1 = (abs_value - deg) * 60
-    min = int(t1)
-    sec = round((t1 - min) * 60, 5)
+    # 4. Get minutes
+    t1 = (abs(decimal_coordinate) - degrees) * 60
+    minutes = int(t1)
 
-    # 4. Return the result
-    return (deg, min, sec, loc_value)
+    # 5. Get seconds
+    seconds = round((t1 - min) * 60, 5)
+
+    return (degrees, minutes, seconds, cardinal_direction)
 
 
-def change_to_rational(number):
-    """convert a number to rational
-    Keyword arguments: number
-    return: tuple like (1, 2), (numerator, denominator)
+def to_rational(number: float) -> Tuple[int, int]:
+    """
+    Convert a number to rational
+    Keyword arguments:
+        number
+    return:
+        tuple like (1, 2), (numerator, denominator)
     """
     fraction = Fraction(str(number))
     return (fraction.numerator, fraction.denominator)
@@ -117,39 +131,40 @@ def get_image_time_unix(image: JpegImageFile) -> float:
 
 def geotag_image(
     image: JpegImageFile, image_file: str, approx_location: Location
-) -> Tuple[Tuple[Tuple[float]]]:
-    lat_f = float(approx_location.latitude) / 10000000.0
-    lon_f = float(approx_location.longitude) / 10000000.0
+) -> Tuple[float, float]:
+    lat_decimal = float(approx_location.latitude) / 1e7
+    lon_decimal = float(approx_location.longitude) / 1e7
 
     exif_dict = piexif.load(image_file)
     exif_dict["GPS"][piexif.GPSIFD.GPSVersionID] = (2, 0, 0, 0)
     exif_dict["GPS"][piexif.GPSIFD.GPSAltitudeRef] = (
         0 if approx_location.altitude > 0 else 1
     )
-    exif_dict["GPS"][piexif.GPSIFD.GPSAltitude] = change_to_rational(
+    exif_dict["GPS"][piexif.GPSIFD.GPSAltitude] = to_rational(
         abs(approx_location.altitude)
     )
-    exif_dict["GPS"][piexif.GPSIFD.GPSLatitudeRef] = "S" if lat_f < 0 else "N"
-    exif_dict["GPS"][piexif.GPSIFD.GPSLongitudeRef] = "W" if lon_f < 0 else "E"
+    exif_dict["GPS"][piexif.GPSIFD.GPSLatitudeRef] = "S" if lat_decimal < 0 else "N"
+    exif_dict["GPS"][piexif.GPSIFD.GPSLongitudeRef] = "W" if lon_decimal < 0 else "E"
 
-    lat_deg = to_deg(lat_f, ["S", "N"])
-    lng_deg = to_deg(lon_f, ["W", "E"])
+    lat_deg = to_deg(lat_decimal, ["S", "N"])
+    lng_deg = to_deg(lon_decimal, ["W", "E"])
     exif_lat = (
-        change_to_rational(lat_deg[0]),
-        change_to_rational(lat_deg[1]),
-        change_to_rational(lat_deg[2]),
+        to_rational(lat_deg[0]),
+        to_rational(lat_deg[1]),
+        to_rational(lat_deg[2]),
     )
-    exif_lng = (
-        change_to_rational(lng_deg[0]),
-        change_to_rational(lng_deg[1]),
-        change_to_rational(lng_deg[2]),
+    exif_lon = (
+        to_rational(lng_deg[0]),
+        to_rational(lng_deg[1]),
+        to_rational(lng_deg[2]),
     )
     exif_dict["GPS"][piexif.GPSIFD.GPSLatitude] = exif_lat
-    exif_dict["GPS"][piexif.GPSIFD.GPSLongitude] = exif_lng
+    exif_dict["GPS"][piexif.GPSIFD.GPSLongitude] = exif_lon
 
     exif_bytes = piexif.dump(exif_dict)
     image.save(image_file, exif=exif_bytes)
-    return (lat_f, lon_f)
+
+    return (lat_decimal, lon_decimal)
 
 
 def main():
@@ -174,13 +189,11 @@ def main():
     )
     with open(locations_file) as f:
         location_data = json.load(f)
-
     print(
         f"{BLUE_TEXT}{BOLD_TEXT}{WHITE_BACKGROUND}Found {len(location_data['locations']):,} locations{RESET_FORMAT}",
-        end="\n\n",
     )
-
     locations_list = [Location(location) for location in location_data["locations"]]
+    print("Loaded all locations.", end="\n\n")
 
     included_extensions = ["jpg", "JPG", "jpeg", "JPEG"]
     image_files = [
@@ -188,7 +201,7 @@ def main():
         for fn in os.listdir(image_dir)
         if any(fn.endswith(ext) for ext in included_extensions)
     ]
-    print(f"Selected {BLUE_TEXT}{len(image_files)}{RESET_FORMAT} images to geotag.")
+    print(f"Selected {BLUE_TEXT}{len(image_files):,}{RESET_FORMAT} images to geotag.")
     print(f"In the folder {BLUE_TEXT}{image_dir}{RESET_FORMAT}", end="\n\n")
 
     for image_file in image_files:
@@ -198,13 +211,13 @@ def main():
 
         image_location = Location()
         image_location.timestamp = int(image_time_unix)
-        approx_location = find_closest_in_time(locations_list, image_location)
+        approx_location = find_closest_location_in_time(locations_list, image_location)
         hours_away = abs(approx_location.timestamp - image_time_unix) / 3600
 
         if hours_away < hours_threshold:
-            exiv_lat, exiv_long = geotag_image(image, image_file_path, approx_location)
+            latitude, longitude = geotag_image(image, image_file_path, approx_location)
             print(
-                f"{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file} ({hours_away:.2f} hours away)     {exiv_lat}, {exiv_long}"
+                f"{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file} ({hours_away:.2f} hours away)     {latitude}, {longitude}"
             )
         else:
             print(
