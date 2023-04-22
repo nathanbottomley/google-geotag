@@ -103,7 +103,7 @@ def to_deg(
     minutes = int(t1)
 
     # 5. Get seconds
-    seconds = round((t1 - min) * 60, 5)
+    seconds = round((t1 - minutes) * 60, 5)
 
     return (degrees, minutes, seconds, cardinal_direction)
 
@@ -217,11 +217,11 @@ def main():
         if hours_away < hours_threshold:
             latitude, longitude = geotag_image(image, image_file_path, approx_location)
             print(
-                f"{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file} ({hours_away:.2f} hours away)     {latitude}, {longitude}"
+                f"{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file} - {image._getexif()[36867]} ({hours_away:.2f} hours away)     {latitude}, {longitude}"
             )
         else:
             print(
-                f"{RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {image_file} ({hours_away:.2f} hours away.)"
+                f"{RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {image_file} - {image._getexif()[36867]} ({hours_away:.2f} hours away.)"
             )
 
 
