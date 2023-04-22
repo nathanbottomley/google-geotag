@@ -184,6 +184,15 @@ def main():
     image_dir = args["dir"]
     hours_threshold = int(args["time"])
 
+    included_extensions = ["jpg", "JPG", "jpeg", "JPEG"]
+    image_files = [
+        fn
+        for fn in os.listdir(image_dir)
+        if any(fn.endswith(ext) for ext in included_extensions)
+    ]
+    print(f"Selected {BLUE_TEXT}{len(image_files):,}{RESET_FORMAT} images to geotag.")
+    print(f"In the folder {BLUE_TEXT}{image_dir}{RESET_FORMAT}", end="\n\n")
+
     print(
         f"Loading location data ... {ITALIC_TEXT}{FAINT_TEXT}(can take a while){RESET_FORMAT}"
     )
@@ -194,15 +203,6 @@ def main():
     )
     locations_list = [Location(location) for location in location_data["locations"]]
     print("Loaded all locations.", end="\n\n")
-
-    included_extensions = ["jpg", "JPG", "jpeg", "JPEG"]
-    image_files = [
-        fn
-        for fn in os.listdir(image_dir)
-        if any(fn.endswith(ext) for ext in included_extensions)
-    ]
-    print(f"Selected {BLUE_TEXT}{len(image_files):,}{RESET_FORMAT} images to geotag.")
-    print(f"In the folder {BLUE_TEXT}{image_dir}{RESET_FORMAT}", end="\n\n")
 
     for image_file in image_files:
         image_file_path = os.path.join(image_dir, image_file)
