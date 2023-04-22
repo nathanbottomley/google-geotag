@@ -210,7 +210,7 @@ def main():
     locations_list = [Location(location) for location in location_data["locations"]]
     print("Loaded all locations.", end="\n\n")
 
-    for image_file in image_files:
+    for num, image_file in enumerate(image_files):
         image_file_path = os.path.join(image_dir, image_file)
         image = Image.open(image_file_path)
         image_time_unix = get_image_time_unix(image)
@@ -223,11 +223,11 @@ def main():
         if hours_away < hours_threshold:
             latitude, longitude = geotag_image(image, image_file_path, approx_location)
             print(
-                f"{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file} - {image._getexif()[36867]} ({hours_away:.2f} hours away)     {latitude}, {longitude}"
+                f"{FAINT_TEXT}{num+1}/{len(image_files)} {RESET_FORMAT}{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file} - {image._getexif()[36867]} ({hours_away:.2f} hours away)     {latitude}, {longitude}"
             )
         else:
             print(
-                f"{RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {image_file} - {image._getexif()[36867]} ({hours_away:.2f} hours away.)"
+                f"{FAINT_TEXT}{num+1}/{len(image_files)} {RESET_FORMAT}{RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {image_file} - {image._getexif()[36867]} ({hours_away:.2f} hours away.)"
             )
 
 
