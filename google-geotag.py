@@ -185,11 +185,17 @@ def main():
     hours_threshold = int(args["time"])
 
     included_extensions = ["jpg", "JPG", "jpeg", "JPEG"]
-    image_files = [
-        fn
-        for fn in os.listdir(image_dir)
-        if any(fn.endswith(ext) for ext in included_extensions)
-    ]
+    try:
+        image_files = [
+            fn
+            for fn in os.listdir(image_dir)
+            if any(fn.endswith(ext) for ext in included_extensions)
+        ]
+    except FileNotFoundError:
+        print(
+            f"{RED_TEXT}{BOLD_TEXT}Error:{RESET_FORMAT} The folder {image_dir} does not exist."
+        )
+        exit()
     print(f"Selected {BLUE_TEXT}{len(image_files):,}{RESET_FORMAT} images to geotag.")
     print(f"In the folder {BLUE_TEXT}{image_dir}{RESET_FORMAT}", end="\n\n")
 
