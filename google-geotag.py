@@ -18,7 +18,6 @@ from fractions import Fraction
 from typing import List, Tuple
 
 import piexif
-from PIL import Image
 from PIL.JpegImagePlugin import JpegImageFile
 
 # Print formatting
@@ -120,22 +119,19 @@ def to_rational(number: float) -> Tuple[int, int]:
     return (fraction.numerator, fraction.denominator)
 
 
-def get_image_time_unix(image: JpegImageFile) -> float:
-    # Get image time from exif data: 36867 is the EXIF tag for DateTimeOriginal
-    image_time_str = image._getexif()[36867]
+def get_image_time_unix(date_time_original: str) -> float:
     # converts the image time string into a time object
-    image_time = datetime.strptime(image_time_str, "%Y:%m:%d %H:%M:%S")
+    image_time = datetime.strptime(date_time_original, "%Y:%m:%d %H:%M:%S")
     # converts the image time object into a unix time object
     return time.mktime(image_time.timetuple())
 
 
 def geotag_image(
-    image: JpegImageFile, image_file_path: str, approx_location: Location
+    exif_dict: dict, image_file_path: str, approx_location: Location
 ) -> Tuple[float, float]:
     lat_decimal = float(approx_location.latitude) / 1e7
     lon_decimal = float(approx_location.longitude) / 1e7
 
-    exif_dict = piexif.load(image_file_path)
     exif_dict["GPS"][piexif.GPSIFD.GPSVersionID] = (2, 0, 0, 0)
     exif_dict["GPS"][piexif.GPSIFD.GPSAltitudeRef] = (
         0 if approx_location.altitude > 0 else 1
@@ -162,7 +158,7 @@ def geotag_image(
     exif_dict["GPS"][piexif.GPSIFD.GPSLongitude] = exif_lon
 
     exif_bytes = piexif.dump(exif_dict)
-    image.save(image_file_path, exif=exif_bytes)
+    piexif.insert(exif_bytes, image_file_path)
 
     return (lat_decimal, lon_decimal)
 
@@ -212,8 +208,11 @@ if __name__ == "__main__":
 
     for num, image_file in enumerate(image_files):
         image_file_path = os.path.join(image_dir, image_file)
-        image = Image.open(image_file_path)
-        image_time_unix = get_image_time_unix(image)
+        exif_dict = piexif.load(image_file_path)
+        date_time_original = exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal].decode(
+            "utf-8"
+        )
+        image_time_unix = get_image_time_unix(date_time_original)
 
         image_location = Location()
         image_location.timestamp = int(image_time_unix)
@@ -221,11 +220,13 @@ if __name__ == "__main__":
         hours_away = abs(approx_location.timestamp - image_time_unix) / 3600
 
         if hours_away < hours_threshold:
-            latitude, longitude = geotag_image(image, image_file_path, approx_location)
+            latitude, longitude = geotag_image(
+                exif_dict, image_file_path, approx_location
+            )
             print(
-                f"{FAINT_TEXT}{num+1}/{len(image_files)} {RESET_FORMAT}{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file} - {image._getexif()[36867]} ({hours_away:.2f} hours away)     {latitude}, {longitude}"
+                f"{FAINT_TEXT}{num+1}/{len(image_files)} {RESET_FORMAT}{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file} - {date_time_original} ({hours_away:.2f} hours away)     {latitude}, {longitude}"
             )
         else:
             print(
-                f"{FAINT_TEXT}{num+1}/{len(image_files)} {RESET_FORMAT}{RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {image_file} - {image._getexif()[36867]} ({hours_away:.2f} hours away.)"
+                f"{FAINT_TEXT}{num+1}/{len(image_files)} {RESET_FORMAT}{RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {image_file} - {date_time_original} ({hours_away:.2f} hours away.)"
             )
