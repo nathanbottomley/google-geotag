@@ -167,7 +167,7 @@ def geotag_image(
     return (lat_decimal, lon_decimal)
 
 
-def main():
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-j",
@@ -229,7 +229,3 @@ def main():
             print(
                 f"{FAINT_TEXT}{num+1}/{len(image_files)} {RESET_FORMAT}{RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {image_file} - {image._getexif()[36867]} ({hours_away:.2f} hours away.)"
             )
-
-
-if __name__ == "__main__":
-    main()
