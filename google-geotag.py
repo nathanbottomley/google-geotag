@@ -130,12 +130,12 @@ def get_image_time_unix(image: JpegImageFile) -> float:
 
 
 def geotag_image(
-    image: JpegImageFile, image_file: str, approx_location: Location
+    image: JpegImageFile, image_file_path: str, approx_location: Location
 ) -> Tuple[float, float]:
     lat_decimal = float(approx_location.latitude) / 1e7
     lon_decimal = float(approx_location.longitude) / 1e7
 
-    exif_dict = piexif.load(image_file)
+    exif_dict = piexif.load(image_file_path)
     exif_dict["GPS"][piexif.GPSIFD.GPSVersionID] = (2, 0, 0, 0)
     exif_dict["GPS"][piexif.GPSIFD.GPSAltitudeRef] = (
         0 if approx_location.altitude > 0 else 1
@@ -162,7 +162,7 @@ def geotag_image(
     exif_dict["GPS"][piexif.GPSIFD.GPSLongitude] = exif_lon
 
     exif_bytes = piexif.dump(exif_dict)
-    image.save(image_file, exif=exif_bytes)
+    image.save(image_file_path, exif=exif_bytes)
 
     return (lat_decimal, lon_decimal)
 
