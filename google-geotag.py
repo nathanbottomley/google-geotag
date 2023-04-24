@@ -27,6 +27,7 @@ ITALIC_TEXT = "\033[3m"
 UNDERLINE_TEXT = "\033[4m"
 GREEN_TEXT = "\033[32m"
 BLUE_TEXT = "\033[34m"
+CYAN_TEXT = "\033[36m"
 RED_TEXT = "\033[31m"
 WHITE_BACKGROUND = "\033[47m"
 RESET_FORMAT = "\033[0m"
@@ -192,8 +193,8 @@ if __name__ == "__main__":
             f"{RED_TEXT}{BOLD_TEXT}Error:{RESET_FORMAT} The folder {image_dir} does not exist."
         )
         exit()
-    print(f"Selected {BLUE_TEXT}{len(image_files):,}{RESET_FORMAT} images to geotag.")
-    print(f"In the folder {BLUE_TEXT}{image_dir}{RESET_FORMAT}", end="\n\n")
+    print(f"Selected {CYAN_TEXT}{len(image_files):,}{RESET_FORMAT} images to geotag.")
+    print(f"In the folder {CYAN_TEXT}{image_dir}{RESET_FORMAT}", end="\n\n")
 
     print(
         f"Loading location data ... {ITALIC_TEXT}{FAINT_TEXT}(can take a while){RESET_FORMAT}"
