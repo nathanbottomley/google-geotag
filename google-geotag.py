@@ -115,12 +115,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("-d", "--dir", help="Images folder.", required=True)
     parser.add_argument(
-        "-t", "--time", help="Hours of tolerance.", default=1, required=False
+        "-e", "--error_hours", help="Hours of tolerance.", default=1, required=False
     )
     args = vars(parser.parse_args())
     locations_file = args["json"]
     image_dir = args["dir"]
-    hours_threshold = int(args["time"])
+    error_hours = int(args["error_hours"])
 
     included_extensions = ["jpg", "JPG", "jpeg", "JPEG", "arw", "ARW"]
     try:
@@ -167,7 +167,7 @@ if __name__ == "__main__":
         approx_location = find_closest_location_in_time(locations_list, image_location)
         hours_away = abs(approx_location.timestamp - image_time_unix) / 3600
 
-        if hours_away < hours_threshold:
+        if hours_away < error_hours:
             latitude, longitude = geotag_image(image_file_path, approx_location)
             print(
                 f"{FAINT_TEXT}{num+1}/{len(image_files)} {RESET_FORMAT}{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file} - {date_time_original} ({hours_away:.2f} hours away)     {latitude}, {longitude}"
