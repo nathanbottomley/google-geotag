@@ -13,7 +13,7 @@ import json
 import os
 import time
 from bisect import bisect_left
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Tuple
 
 from exiftool import ExifToolHelper
@@ -74,13 +74,6 @@ def find_closest_location_in_time(
         return before
 
 
-def get_image_time_unix(date_time_original: str) -> float:
-    # converts the image time string into a time object
-    image_time = datetime.strptime(date_time_original, "%Y:%m:%d %H:%M:%S")
-    # converts the image time object into a unix time object
-    return time.mktime(image_time.timetuple())
-
-
 def geotag_image(
     image_file_path: str, approx_location: Location
 ) -> Tuple[float, float]:
@@ -117,10 +110,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "-e", "--error_hours", help="Hours of tolerance.", default=1, required=False
     )
+    parser.add_argument(
+        "-tz",
+        "--timezone",
+        help="Used for correcting timezone offsets as photos are not timezone aware.",
+        default=0,
+        required=False,
+    )
     args = vars(parser.parse_args())
     locations_file = args["json"]
     image_dir = args["dir"]
     error_hours = int(args["error_hours"])
+    timezone_offset = int(args["timezone"])
 
     included_extensions = ["jpg", "JPG", "jpeg", "JPEG", "arw", "ARW"]
     try:
@@ -160,7 +161,10 @@ if __name__ == "__main__":
         with ExifToolHelper() as et:
             metadata = et.get_metadata(image_file_path)[0]
         date_time_original = metadata["EXIF:DateTimeOriginal"]
-        image_time_unix = get_image_time_unix(date_time_original)
+        image_time_utc = datetime.strptime(
+            date_time_original, "%Y:%m:%d %H:%M:%S"
+        ) - timedelta(hours=timezone_offset)
+        image_time_unix = time.mktime(image_time_utc.timetuple())
 
         image_location = Location()
         image_location.timestamp = int(image_time_unix)
