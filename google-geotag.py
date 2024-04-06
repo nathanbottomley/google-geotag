@@ -8,6 +8,8 @@
 #   -j JSON, --json JSON  The JSON file containing your location history.
 #   -d DIR, --dir DIR     Images folder.
 #   -t TIME, --time TIME  Hours of tolerance.
+#
+# Google Takeout Link: https://takeout.google.com/
 import argparse
 import json
 import os
