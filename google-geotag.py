@@ -98,6 +98,21 @@ def geotag_image(
     return (lat_decimal, lon_decimal)
 
 
+def get_formatted_time_error(hours: float) -> str:
+    """
+    Takes a time in hours and returns a formatted string
+    If the time is less than 1 hour, it returns the time in minutes.
+    If the time is less than 120 seconds it returns the time in seconds.
+    """
+    if hours > 1:
+        return f"{hours:.2f} hours away"
+    minutes = hours * 60
+    if minutes > 1:
+        return f"{minutes:.1f} min away"
+    seconds = minutes * 60
+    return f"{int(seconds)} sec away"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -174,9 +189,9 @@ if __name__ == "__main__":
         if hours_away < error_hours:
             latitude, longitude = geotag_image(image_file_path, approx_location)
             print(
-                f"{FAINT_TEXT}{num+1}/{len(image_files)} {RESET_FORMAT}{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file} - {date_time_original} ({hours_away:.2f} hours away)     {latitude}, {longitude}"
+                f"{FAINT_TEXT}{num+1}/{len(image_files)} {RESET_FORMAT}{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file} - {date_time_original} ({get_formatted_time_error(hours_away)})     {latitude}, {longitude}"
             )
         else:
             print(
-                f"{FAINT_TEXT}{num+1}/{len(image_files)} {RESET_FORMAT}{RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {image_file} - {date_time_original} ({hours_away:.2f} hours away.)"
+                f"{FAINT_TEXT}{num+1}/{len(image_files)} {RESET_FORMAT}{RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {image_file} - {date_time_original} ({get_formatted_time_error(hours_away)} min away.)"
             )
