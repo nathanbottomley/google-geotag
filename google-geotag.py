@@ -30,6 +30,8 @@ RED_TEXT = "\033[31m"
 WHITE_BACKGROUND = "\033[47m"
 RESET_FORMAT = "\033[0m"
 
+INCLUDED_FILE_EXTENSIONS = ["jpg", "JPG", "jpeg", "JPEG", "arw", "ARW"]
+
 
 class Location(object):
     def __init__(self, d: dict = None):
@@ -53,6 +55,88 @@ class Location(object):
 
     def __lt__(self, other):
         return self.timestamp < other.timestamp
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-j",
+        "--json",
+        help="The JSON file containing your location history.",
+        required=True,
+    )
+    parser.add_argument("-d", "--dir", help="Images folder.", required=True)
+    parser.add_argument(
+        "-e", "--error_hours", help="Hours of tolerance.", default=1, required=False
+    )
+    parser.add_argument(
+        "-tz",
+        "--timezone",
+        help="Used for correcting timezone offsets as photos are not timezone aware.",
+        default=0,
+        required=False,
+    )
+    args = vars(parser.parse_args())
+    locations_file = args["json"]
+    image_dir = args["dir"]
+    error_hours = int(args["error_hours"])
+    timezone_offset = int(args["timezone"])
+    return locations_file, image_dir, error_hours, timezone_offset
+
+
+def read_image_file_names(image_dir):
+    try:
+        image_files = [
+            fn
+            for fn in os.listdir(image_dir)
+            if any(fn.endswith(ext) for ext in INCLUDED_FILE_EXTENSIONS)
+        ]
+    except FileNotFoundError:
+        print(
+            f"{RED_TEXT}{BOLD_TEXT}Error:{RESET_FORMAT} The folder {image_dir} does not exist."
+        )
+        exit()
+
+    if not image_files:
+        print(
+            f"{RED_TEXT}{BOLD_TEXT}Error:{RESET_FORMAT} No images found in the folder {image_dir}."
+        )
+        exit()
+    print(f"Selected {CYAN_TEXT}{len(image_files):,}{RESET_FORMAT} images to geotag.")
+    print(f"In the folder {CYAN_TEXT}{image_dir}{RESET_FORMAT}", end="\n\n")
+    return image_files
+
+
+def load_locations(
+    google_locations_file,
+):
+    print(
+        f"Loading location data ... {ITALIC_TEXT}{FAINT_TEXT}(can take a while){RESET_FORMAT}"
+    )
+    with open(google_locations_file) as f:
+        location_data = json.load(f)
+    print(
+        f"{BLUE_TEXT}{BOLD_TEXT}{WHITE_BACKGROUND}Found {len(location_data['locations']):,} locations{RESET_FORMAT}",
+    )
+    locations_list = [Location(location) for location in location_data["locations"]]
+    print("Loaded all locations.", end="\n\n")
+    return locations_list
+
+
+def get_approximate_image_location(timezone_offset, locations_list, image_file_path):
+    with ExifToolHelper() as et:
+        metadata = et.get_metadata(image_file_path)[0]
+    date_time_original = metadata["EXIF:DateTimeOriginal"]
+    image_time_utc = datetime.strptime(
+        date_time_original, "%Y:%m:%d %H:%M:%S"
+    ) - timedelta(hours=timezone_offset)
+    image_time_unix = time.mktime(image_time_utc.timetuple())
+
+    image_location = Location()
+    image_location.timestamp = int(image_time_unix)
+    approx_location = find_closest_location_in_time(locations_list, image_location)
+    hours_away = abs(approx_location.timestamp - image_time_unix) / 3600
+    return date_time_original, approx_location, hours_away
 
 
 def find_closest_location_in_time(
@@ -114,84 +198,30 @@ def get_formatted_time_error(hours: float) -> str:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-j",
-        "--json",
-        help="The JSON file containing your location history.",
-        required=True,
-    )
-    parser.add_argument("-d", "--dir", help="Images folder.", required=True)
-    parser.add_argument(
-        "-e", "--error_hours", help="Hours of tolerance.", default=1, required=False
-    )
-    parser.add_argument(
-        "-tz",
-        "--timezone",
-        help="Used for correcting timezone offsets as photos are not timezone aware.",
-        default=0,
-        required=False,
-    )
-    args = vars(parser.parse_args())
-    locations_file = args["json"]
-    image_dir = args["dir"]
-    error_hours = int(args["error_hours"])
-    timezone_offset = int(args["timezone"])
 
-    included_extensions = ["jpg", "JPG", "jpeg", "JPEG", "arw", "ARW"]
-    try:
-        image_files = [
-            fn
-            for fn in os.listdir(image_dir)
-            if any(fn.endswith(ext) for ext in included_extensions)
-        ]
-    except FileNotFoundError:
-        print(
-            f"{RED_TEXT}{BOLD_TEXT}Error:{RESET_FORMAT} The folder {image_dir} does not exist."
+    google_locations_file, image_dir, error_hours, timezone_offset = parse_arguments()
+
+    image_file_names = read_image_file_names(image_dir)
+
+    locations_list = load_locations(google_locations_file)
+
+    for num, image_file_name in enumerate(image_file_names):
+        image_file_path = os.path.join(image_dir, image_file_name)
+
+        date_time_original, approx_location, hours_away = (
+            get_approximate_image_location(
+                timezone_offset,
+                locations_list,
+                image_file_path,
+            )
         )
-        exit()
-
-    if not image_files:
-        print(
-            f"{RED_TEXT}{BOLD_TEXT}Error:{RESET_FORMAT} No images found in the folder {image_dir}."
-        )
-        exit()
-    print(f"Selected {CYAN_TEXT}{len(image_files):,}{RESET_FORMAT} images to geotag.")
-    print(f"In the folder {CYAN_TEXT}{image_dir}{RESET_FORMAT}", end="\n\n")
-
-    print(
-        f"Loading location data ... {ITALIC_TEXT}{FAINT_TEXT}(can take a while){RESET_FORMAT}"
-    )
-    with open(locations_file) as f:
-        location_data = json.load(f)
-    print(
-        f"{BLUE_TEXT}{BOLD_TEXT}{WHITE_BACKGROUND}Found {len(location_data['locations']):,} locations{RESET_FORMAT}",
-    )
-    locations_list = [Location(location) for location in location_data["locations"]]
-    print("Loaded all locations.", end="\n\n")
-
-    for num, image_file in enumerate(image_files):
-        image_file_path = os.path.join(image_dir, image_file)
-
-        with ExifToolHelper() as et:
-            metadata = et.get_metadata(image_file_path)[0]
-        date_time_original = metadata["EXIF:DateTimeOriginal"]
-        image_time_utc = datetime.strptime(
-            date_time_original, "%Y:%m:%d %H:%M:%S"
-        ) - timedelta(hours=timezone_offset)
-        image_time_unix = time.mktime(image_time_utc.timetuple())
-
-        image_location = Location()
-        image_location.timestamp = int(image_time_unix)
-        approx_location = find_closest_location_in_time(locations_list, image_location)
-        hours_away = abs(approx_location.timestamp - image_time_unix) / 3600
 
         if hours_away < error_hours:
             latitude, longitude = geotag_image(image_file_path, approx_location)
             print(
-                f"{FAINT_TEXT}{num+1}/{len(image_files)} {RESET_FORMAT}{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file} - {date_time_original} ({get_formatted_time_error(hours_away)})     {latitude}, {longitude}"
+                f"{FAINT_TEXT}{num+1}/{len(image_file_names)} {RESET_FORMAT}{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file_name} - {date_time_original} ({get_formatted_time_error(hours_away)})     {latitude}, {longitude}"
             )
         else:
             print(
-                f"{FAINT_TEXT}{num+1}/{len(image_files)} {RESET_FORMAT}{RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {image_file} - {date_time_original} ({get_formatted_time_error(hours_away)} min away.)"
+                f"{FAINT_TEXT}{num+1}/{len(image_file_names)} {RESET_FORMAT}{RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {image_file_name} - {date_time_original} ({get_formatted_time_error(hours_away)} min away.)"
             )
