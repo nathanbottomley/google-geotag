@@ -36,10 +36,13 @@ INCLUDED_FILE_EXTENSIONS = ["jpg", "JPG", "jpeg", "JPEG", "arw", "ARW"]
 
 
 class Location(object):
-    def __init__(self, timestamp: float, latitude: float, longitude: float):
-        self.timestamp = timestamp
-        self.latitude = latitude
-        self.longitude = longitude
+    def __init__(self, d: dict = None):
+        if d is None:
+            d = {}
+        self.timestamp: float = self.get_timestamp(d.get("timestamp"))
+        self.latitude = d.get("latitudeE7")
+        self.longitude = d.get("longitudeE7")
+        self.altitude = d.get("altitude", 0)
 
     def get_timestamp(self, timestamp):
         if timestamp is None:
@@ -58,6 +61,12 @@ class Location(object):
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-j",
+        "--json",
+        help="The JSON file containing your location history.",
+        required=True,
+    )
     parser.add_argument("-d", "--dir", help="Images folder.", required=True)
     parser.add_argument(
         "-e", "--error_hours", help="Hours of tolerance.", default=1, required=False
@@ -70,21 +79,20 @@ def parse_arguments():
         required=False,
     )
     args = vars(parser.parse_args())
+    locations_file = args["json"]
     image_dir = args["dir"]
     error_hours = int(args["error_hours"])
     timezone_offset = int(args["timezone"])
-    return image_dir, error_hours, timezone_offset
+    return locations_file, image_dir, error_hours, timezone_offset
 
 
 def read_image_file_names(image_dir):
     try:
-        image_files = sorted(
-            [
-                fn
-                for fn in os.listdir(image_dir)
-                if any(fn.endswith(ext) for ext in INCLUDED_FILE_EXTENSIONS)
-            ]
-        )
+        image_files = [
+            fn
+            for fn in os.listdir(image_dir)
+            if any(fn.endswith(ext) for ext in INCLUDED_FILE_EXTENSIONS)
+        ]
     except FileNotFoundError:
         print(
             f"{RED_TEXT}{BOLD_TEXT}Error:{RESET_FORMAT} The folder {image_dir} does not exist."
@@ -101,69 +109,19 @@ def read_image_file_names(image_dir):
     return image_files
 
 
-def load_locations(google_locations_file):
+def load_locations(
+    google_locations_file,
+):
     print(
         f"Loading location data ... {ITALIC_TEXT}{FAINT_TEXT}(can take a while){RESET_FORMAT}"
     )
     with open(google_locations_file) as f:
         location_data = json.load(f)
-
-    locations_list = []
-
-    for entry in location_data:
-        # Handle entries with 'timelinePath' (New Format)
-        if not "timelinePath" in entry:
-            continue
-
-        start_time_str = entry.get("startTime")
-        if not start_time_str:
-            continue
-        try:
-            start_time = datetime.strptime(start_time_str, "%Y-%m-%dT%H:%M:%S.%fZ")
-        except ValueError:
-            try:
-                start_time = datetime.strptime(start_time_str, "%Y-%m-%dT%H:%M:%SZ")
-            except ValueError:
-                print(
-                    f"{RED_TEXT}Warning:{RESET_FORMAT} Invalid startTime format: {start_time_str}"
-                )
-                continue
-
-        timeline_path = entry.get("timelinePath", [])
-        for point in timeline_path:
-            point_str = point.get("point")
-            duration_offset_str = point.get("durationMinutesOffsetFromStartTime")
-            if not point_str or not duration_offset_str:
-                continue
-            if not point_str.startswith("geo:"):
-                continue
-            try:
-                lat_str, lon_str = point_str[4:].split(",")
-                latitude = float(lat_str)
-                longitude = float(lon_str)
-            except ValueError:
-                print(
-                    f"{RED_TEXT}Warning:{RESET_FORMAT} Invalid point format: {point_str}"
-                )
-                continue
-            try:
-                duration_offset = int(duration_offset_str)
-            except ValueError:
-                print(
-                    f"{RED_TEXT}Warning:{RESET_FORMAT} Invalid duration offset: {duration_offset_str}"
-                )
-                continue
-            # Compute the timestamp
-            point_time = start_time + timedelta(minutes=duration_offset)
-            timestamp = point_time.timestamp()
-            location = Location(timestamp, latitude, longitude)
-            locations_list.append(location)
-
-    # Sort the locations list by timestamp
-    locations_list.sort()
     print(
-        f"{BLUE_TEXT}{BOLD_TEXT}{WHITE_BACKGROUND}Loaded {len(locations_list):,} locations{RESET_FORMAT}"
+        f"{BLUE_TEXT}{BOLD_TEXT}{WHITE_BACKGROUND}Found {len(location_data['locations']):,} locations{RESET_FORMAT}",
     )
+    locations_list = [Location(location) for location in location_data["locations"]]
+    print("Loaded all locations.", end="\n\n")
     return locations_list
 
 
@@ -171,23 +129,13 @@ def get_approximate_image_location(timezone_offset, locations_list, image_file_p
     with ExifToolHelper() as et:
         metadata = et.get_metadata(image_file_path)[0]
     date_time_original = metadata["EXIF:DateTimeOriginal"]
-    if not date_time_original:
-        print(
-            f"{RED_TEXT}Warning:{RESET_FORMAT} No DateTimeOriginal for {image_file_path}. Skipping."
-        )
-        return None, None, None
-    try:
-        image_time = datetime.strptime(date_time_original, "%Y:%m:%d %H:%M:%S")
-    except ValueError:
-        print(
-            f"{RED_TEXT}Warning:{RESET_FORMAT} Invalid DateTimeOriginal format: {date_time_original}. Skipping."
-        )
-        return None, None, None
-    # Adjust for timezone
-    image_time_utc = image_time - timedelta(hours=timezone_offset)
-    image_time_unix = image_time_utc.timestamp()
+    image_time_utc = datetime.strptime(
+        date_time_original, "%Y:%m:%d %H:%M:%S"
+    ) - timedelta(hours=timezone_offset)
+    image_time_unix = time.mktime(image_time_utc.timetuple())
 
-    image_location = Location(timestamp=image_time_unix, latitude=0, longitude=0)
+    image_location = Location()
+    image_location.timestamp = int(image_time_unix)
     approx_location = find_closest_location_in_time(locations_list, image_location)
     hours_away = abs(approx_location.timestamp - image_time_unix) / 3600
     return date_time_original, approx_location, hours_away
@@ -215,14 +163,16 @@ def find_closest_location_in_time(
 def geotag_image(
     image_file_path: str, approx_location: Location
 ) -> Tuple[float, float]:
-    lat_decimal = float(approx_location.latitude)
-    lon_decimal = float(approx_location.longitude)
+    lat_decimal = float(approx_location.latitude) / 1e7
+    lon_decimal = float(approx_location.longitude) / 1e7
 
     with ExifToolHelper() as et:
         et.set_tags(
             image_file_path,
             tags={
                 "GPSVersionID": "2 2 0 0",
+                "GPSAltitudeRef": 0 if approx_location.altitude > 0 else 1,
+                "GPSAltitude": abs(approx_location.altitude),
                 "GPSLatitudeRef": "S" if lat_decimal < 0 else "N",
                 "GPSLatitude": lat_decimal,
                 "GPSLongitudeRef": "W" if lon_decimal < 0 else "E",
@@ -251,9 +201,7 @@ def get_formatted_time_error(hours: float) -> str:
 
 if __name__ == "__main__":
 
-    google_locations_file = "location-history.json"
-
-    image_dir, error_hours, timezone_offset = parse_arguments()
+    google_locations_file, image_dir, error_hours, timezone_offset = parse_arguments()
 
     image_file_names = read_image_file_names(image_dir)
 
