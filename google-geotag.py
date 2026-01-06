@@ -62,6 +62,19 @@ def parse_arguments():
         "-e", "--error_hours", help="Hours of tolerance.", default=1, required=False
     )
     parser.add_argument(
+        "-f",
+        "--force",
+        help="Overwrite GPS data if it already exists.",
+        action="store_true",
+        required=False,
+    )
+    parser.add_argument(
+        "--dry-run",
+        help="Show what would be changed without modifying any files.",
+        action="store_true",
+        required=False,
+    )
+    parser.add_argument(
         "-tz",
         "--timezone",
         help="Used for correcting timezone offsets as photos are not timezone aware.",
@@ -72,7 +85,26 @@ def parse_arguments():
     image_dir = args["dir"]
     error_hours = int(args["error_hours"])
     timezone_offset = int(args["timezone"])
-    return image_dir, error_hours, timezone_offset
+    force_overwrite = args["force"]
+    dry_run = args["dry_run"]
+    return image_dir, error_hours, timezone_offset, force_overwrite, dry_run
+
+
+def _format_gps_value(value):
+    try:
+        return f"{float(value):.6f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def get_existing_gps(image_file_path):
+    with ExifToolHelper() as et:
+        metadata = et.get_metadata(image_file_path)[0]
+    lat = metadata.get("Composite:GPSLatitude", metadata.get("EXIF:GPSLatitude"))
+    lon = metadata.get("Composite:GPSLongitude", metadata.get("EXIF:GPSLongitude"))
+    if lat is None or lon is None:
+        return None
+    return _format_gps_value(lat), _format_gps_value(lon)
 
 
 def read_image_file_names(image_dir):
@@ -252,7 +284,9 @@ if __name__ == "__main__":
 
     google_locations_file = "location-history.json"
 
-    image_dir, error_hours, timezone_offset = parse_arguments()
+    image_dir, error_hours, timezone_offset, force_overwrite, dry_run = (
+        parse_arguments()
+    )
 
     image_file_names = read_image_file_names(image_dir)
 
@@ -260,6 +294,14 @@ if __name__ == "__main__":
 
     for num, image_file_name in enumerate(image_file_names):
         image_file_path = os.path.join(image_dir, image_file_name)
+
+        existing_gps = get_existing_gps(image_file_path)
+        if existing_gps and not force_overwrite:
+            latitude, longitude = existing_gps
+            print(
+                f"{FAINT_TEXT}{num+1}/{len(image_file_names)} {RESET_FORMAT}{BLUE_TEXT}{BOLD_TEXT}Not Geotagged:{RESET_FORMAT} {image_file_name} - Already has GPS data {latitude}, {longitude}"
+            )
+            continue
 
         date_time_original, approx_location, hours_away = (
             get_approximate_image_location(
@@ -270,10 +312,18 @@ if __name__ == "__main__":
         )
 
         if hours_away < error_hours:
-            latitude, longitude = geotag_image(image_file_path, approx_location)
-            print(
-                f"{FAINT_TEXT}{num+1}/{len(image_file_names)} {RESET_FORMAT}{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file_name} - {date_time_original} ({get_formatted_time_error(hours_away)})     {latitude}, {longitude}"
-            )
+            if dry_run:
+                latitude = f"{float(approx_location.latitude):.6f}"
+                longitude = f"{float(approx_location.longitude):.6f}"
+                action = "Would overwrite" if existing_gps else "Would geotag"
+                print(
+                    f"{FAINT_TEXT}{num+1}/{len(image_file_names)} {RESET_FORMAT}{CYAN_TEXT}{BOLD_TEXT}{action}:{RESET_FORMAT} {image_file_name} - {date_time_original} ({get_formatted_time_error(hours_away)})     {latitude}, {longitude}"
+                )
+            else:
+                latitude, longitude = geotag_image(image_file_path, approx_location)
+                print(
+                    f"{FAINT_TEXT}{num+1}/{len(image_file_names)} {RESET_FORMAT}{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file_name} - {date_time_original} ({get_formatted_time_error(hours_away)})     {latitude}, {longitude}"
+                )
         else:
             print(
                 f"{FAINT_TEXT}{num+1}/{len(image_file_names)} {RESET_FORMAT}{RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {image_file_name} - {date_time_original} ({get_formatted_time_error(hours_away)} min away.)"
