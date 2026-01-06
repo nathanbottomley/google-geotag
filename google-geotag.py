@@ -104,7 +104,19 @@ def get_existing_gps(image_file_path):
     lon = metadata.get("Composite:GPSLongitude", metadata.get("EXIF:GPSLongitude"))
     if lat is None or lon is None:
         return None
-    return _format_gps_value(lat), _format_gps_value(lon)
+    try:
+        return float(lat), float(lon)
+    except (TypeError, ValueError):
+        return None
+
+
+def geotag_image_with_coords(image_file_path: str, latitude: float, longitude: float):
+    location = Location(timestamp=0, latitude=latitude, longitude=longitude)
+    return geotag_image(image_file_path, location)
+
+
+def format_index_label(index: int, total: int, index_width: int) -> str:
+    return f"{index + 1:>{index_width}}/{total}"
 
 
 def read_image_file_names(image_dir):
@@ -292,14 +304,31 @@ if __name__ == "__main__":
 
     locations_list = load_locations(google_locations_file)
 
+    total_images = len(image_file_names)
+    index_width = len(str(total_images))
+    name_width = max(len(name) for name in image_file_names)
+
+    image_infos = []
+
     for num, image_file_name in enumerate(image_file_names):
         image_file_path = os.path.join(image_dir, image_file_name)
+        index_label = format_index_label(num, total_images, index_width)
+        name_label = f"{image_file_name:<{name_width}}"
 
         existing_gps = get_existing_gps(image_file_path)
         if existing_gps and not force_overwrite:
             latitude, longitude = existing_gps
             print(
-                f"{FAINT_TEXT}{num+1}/{len(image_file_names)} {RESET_FORMAT}{BLUE_TEXT}{BOLD_TEXT}Not Geotagged:{RESET_FORMAT} {image_file_name} - Already has GPS data {latitude}, {longitude}"
+                f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {BLUE_TEXT}{BOLD_TEXT}Not Geotagged:{RESET_FORMAT} {name_label} - Already has GPS data {_format_gps_value(latitude)}, {_format_gps_value(longitude)}"
+            )
+            image_infos.append(
+                {
+                    "index": num,
+                    "name": image_file_name,
+                    "path": image_file_path,
+                    "status": "has_gps",
+                    "coords": (latitude, longitude),
+                }
             )
             continue
 
@@ -311,20 +340,169 @@ if __name__ == "__main__":
             )
         )
 
-        if hours_away < error_hours:
+        if hours_away is None or approx_location is None or date_time_original is None:
+            print(
+                f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {name_label} - No valid timestamp found."
+            )
+            image_infos.append(
+                {
+                    "index": num,
+                    "name": image_file_name,
+                    "path": image_file_path,
+                    "status": "untaggable",
+                    "coords": None,
+                }
+            )
+        elif hours_away < error_hours:
             if dry_run:
-                latitude = f"{float(approx_location.latitude):.6f}"
-                longitude = f"{float(approx_location.longitude):.6f}"
+                latitude = float(approx_location.latitude)
+                longitude = float(approx_location.longitude)
                 action = "Would overwrite" if existing_gps else "Would geotag"
                 print(
-                    f"{FAINT_TEXT}{num+1}/{len(image_file_names)} {RESET_FORMAT}{CYAN_TEXT}{BOLD_TEXT}{action}:{RESET_FORMAT} {image_file_name} - {date_time_original} ({get_formatted_time_error(hours_away)})     {latitude}, {longitude}"
+                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {CYAN_TEXT}{BOLD_TEXT}{action}:{RESET_FORMAT} {name_label} - {date_time_original} ({get_formatted_time_error(hours_away)})     {_format_gps_value(latitude)}, {_format_gps_value(longitude)}"
                 )
             else:
                 latitude, longitude = geotag_image(image_file_path, approx_location)
                 print(
-                    f"{FAINT_TEXT}{num+1}/{len(image_file_names)} {RESET_FORMAT}{GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {image_file_name} - {date_time_original} ({get_formatted_time_error(hours_away)})     {latitude}, {longitude}"
+                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {name_label} - {date_time_original} ({get_formatted_time_error(hours_away)})     {latitude}, {longitude}"
                 )
+                latitude = float(latitude)
+                longitude = float(longitude)
+            image_infos.append(
+                {
+                    "index": num,
+                    "name": image_file_name,
+                    "path": image_file_path,
+                    "status": "geotagged",
+                    "coords": (latitude, longitude),
+                }
+            )
         else:
             print(
-                f"{FAINT_TEXT}{num+1}/{len(image_file_names)} {RESET_FORMAT}{RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {image_file_name} - {date_time_original} ({get_formatted_time_error(hours_away)} min away.)"
+                f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {name_label} - {date_time_original} ({get_formatted_time_error(hours_away)})"
             )
+            image_infos.append(
+                {
+                    "index": num,
+                    "name": image_file_name,
+                    "path": image_file_path,
+                    "status": "untaggable",
+                    "coords": None,
+                }
+            )
+
+    untaggable_batches = []
+    current_batch = None
+    for info in image_infos:
+        if info["status"] == "untaggable":
+            if current_batch is None:
+                current_batch = {
+                    "start_index": info["index"],
+                    "end_index": info["index"],
+                    "images": [info],
+                }
+            else:
+                current_batch["end_index"] = info["index"]
+                current_batch["images"].append(info)
+        else:
+            if current_batch is not None:
+                untaggable_batches.append(current_batch)
+                current_batch = None
+    if current_batch is not None:
+        untaggable_batches.append(current_batch)
+
+    if not untaggable_batches:
+        print(f"{GREEN_TEXT}{BOLD_TEXT}All images geotagged 🎉{RESET_FORMAT}")
+        exit()
+
+    print(
+        f"{RED_TEXT}{BOLD_TEXT}There are {len(untaggable_batches)} batches of images that could not be geotagged.{RESET_FORMAT}"
+    )
+
+    def find_previous_coords(start_index):
+        for idx in range(start_index - 1, -1, -1):
+            coords = image_infos[idx].get("coords")
+            if coords:
+                return coords
+        return None
+
+    def find_next_coords(end_index):
+        for idx in range(end_index + 1, len(image_infos)):
+            coords = image_infos[idx].get("coords")
+            if coords:
+                return coords
+        return None
+
+    for batch_num, batch in enumerate(untaggable_batches, start=1):
+        start_num = batch["start_index"] + 1
+        end_num = batch["end_index"] + 1
+        start_name = batch["images"][0]["name"]
+        end_name = batch["images"][-1]["name"]
+        if start_name == end_name:
+            range_label = start_name
+        else:
+            range_label = f"{start_name} -> {end_name}"
+        print(f"{BOLD_TEXT}Batch {batch_num}:{RESET_FORMAT} {range_label}")
+        prev_coords = find_previous_coords(batch["start_index"])
+        next_coords = find_next_coords(batch["end_index"])
+
+        while True:
+            print("Choose how to geotag this batch:")
+            print("  1) use coordinates of previous image")
+            print("  2) use coordinates of subsequent image")
+            print("  3) enter coordinates manually")
+            print("  4) do not geotag")
+            choice = input("Enter choice [1-4]: ").strip()
+
+            if choice == "1":
+                if not prev_coords:
+                    print(
+                        f"{RED_TEXT}No previous image coordinates available for this batch.{RESET_FORMAT}"
+                    )
+                    continue
+                chosen_coords = prev_coords
+                break
+            if choice == "2":
+                if not next_coords:
+                    print(
+                        f"{RED_TEXT}No subsequent image coordinates available for this batch.{RESET_FORMAT}"
+                    )
+                    continue
+                chosen_coords = next_coords
+                break
+            if choice == "3":
+                lat_input = input("Enter latitude: ").strip()
+                lon_input = input("Enter longitude: ").strip()
+                try:
+                    chosen_coords = (float(lat_input), float(lon_input))
+                    break
+                except ValueError:
+                    print(f"{RED_TEXT}Invalid coordinates.{RESET_FORMAT}")
+                    continue
+            if choice == "4":
+                chosen_coords = None
+                break
+            print(f"{RED_TEXT}Invalid choice.{RESET_FORMAT}")
+
+        if chosen_coords is None:
+            print(
+                f"{FAINT_TEXT}{range_label}{RESET_FORMAT} {BLUE_TEXT}Skipped geotagging for batch {batch_num}.{RESET_FORMAT}"
+            )
+            continue
+
+        for image in batch["images"]:
+            index_label = format_index_label(
+                image["index"], total_images, index_width
+            )
+            name_label = f"{image['name']:<{name_width}}"
+            if dry_run:
+                print(
+                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {CYAN_TEXT}{BOLD_TEXT}Would geotag:{RESET_FORMAT} {name_label}     {_format_gps_value(chosen_coords[0])}, {_format_gps_value(chosen_coords[1])}"
+                )
+            else:
+                latitude, longitude = geotag_image_with_coords(
+                    image["path"], chosen_coords[0], chosen_coords[1]
+                )
+                print(
+                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {name_label}     {_format_gps_value(latitude)}, {_format_gps_value(longitude)}"
+                )
