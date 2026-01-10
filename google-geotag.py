@@ -33,7 +33,6 @@ RESET_FORMAT = "\033[0m"
 
 INCLUDED_FILE_EXTENSIONS = ["jpg", "JPG", "jpeg", "JPEG", "arw", "ARW"]
 TIME_FORMAT_WIDTH = 19
-GPS_COORDS_WIDTH = 25
 ACTION_WIDTH = len("Already geotagged")
 TIME_AWAY_WIDTH = 14
 SOURCE_WIDTH = len("subsequent photo")
@@ -41,7 +40,7 @@ SOURCE_WIDTH = len("subsequent photo")
 
 class Location(object):
     def __init__(
-        self, timestamp: float, latitude: float, longitude: float, source: str = ""
+        self, timestamp: float, latitude: str, longitude: str, source: str = ""
     ):
         self.timestamp = timestamp
         self.latitude = latitude
@@ -98,11 +97,23 @@ def parse_arguments():
     return image_dir, error_hours, timezone_offset, force_overwrite, dry_run
 
 
-def _format_gps_value(value):
+def normalize_gps_value(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
     try:
-        return f"{float(value):.6f}"
+        return repr(float(value))
     except (TypeError, ValueError):
         return str(value)
+
+
+def format_coords(latitude, longitude):
+    lat_value = normalize_gps_value(latitude)
+    lon_value = normalize_gps_value(longitude)
+    if lat_value is None or lon_value is None:
+        return None
+    return f"{lat_value}, {lon_value}"
 
 
 def get_existing_gps(image_file_path):
@@ -112,10 +123,11 @@ def get_existing_gps(image_file_path):
     lon = metadata.get("Composite:GPSLongitude", metadata.get("EXIF:GPSLongitude"))
     if lat is None or lon is None:
         return None
-    try:
-        return float(lat), float(lon)
-    except (TypeError, ValueError):
+    lat_value = normalize_gps_value(lat)
+    lon_value = normalize_gps_value(lon)
+    if lat_value is None or lon_value is None:
         return None
+    return lat_value, lon_value
 
 
 def get_image_datetime(image_file_path):
@@ -145,11 +157,13 @@ def format_output_line(
     coords: str,
     time_away: str,
     source: str,
+    coords_width: int,
 ) -> str:
     action_label = f"{action:<{ACTION_WIDTH}}"
     name_label = f"{name:<{name_width}}"
     time_label = f"{(photo_time or '-'): <{TIME_FORMAT_WIDTH}}"
-    coords_label = f"{(coords or '-'): <{GPS_COORDS_WIDTH}}"
+    coords_value = coords or "-"
+    coords_label = f"{coords_value:<{coords_width}}"
     time_away_label = f"{(time_away or '-'): <{TIME_AWAY_WIDTH}}"
     source_label = f"{(source or '-'): <{SOURCE_WIDTH}}"
     return (
@@ -226,8 +240,10 @@ def load_locations(google_locations_file):
                 continue
             try:
                 lat_str, lon_str = point_str[4:].split(",")
-                latitude = float(lat_str)
-                longitude = float(lon_str)
+                float(lat_str)
+                float(lon_str)
+                latitude = lat_str
+                longitude = lon_str
             except ValueError:
                 print(
                     f"{RED_TEXT}Warning:{RESET_FORMAT} Invalid point format: {point_str}"
@@ -243,7 +259,12 @@ def load_locations(google_locations_file):
             # Compute the timestamp
             point_time = start_time + timedelta(minutes=duration_offset)
             timestamp = point_time.timestamp()
-            location = Location(timestamp, latitude, longitude, source="google")
+            location = Location(
+                timestamp,
+                normalize_gps_value(latitude),
+                normalize_gps_value(longitude),
+                source="google",
+            )
             locations_list.append(location)
 
     # Sort the locations list by timestamp
@@ -275,9 +296,11 @@ def load_photo_locations(image_file_names, image_dir, timezone_offset):
             image_time = datetime.strptime(date_time_original, "%Y:%m:%d %H:%M:%S")
             image_time_utc = image_time - timedelta(hours=timezone_offset)
             timestamp = image_time_utc.timestamp()
-            latitude = float(lat)
-            longitude = float(lon)
+            latitude = normalize_gps_value(lat)
+            longitude = normalize_gps_value(lon)
         except (ValueError, TypeError):
+            continue
+        if latitude is None or longitude is None:
             continue
         locations_list.append(Location(timestamp, latitude, longitude, source="photo"))
 
@@ -310,7 +333,7 @@ def get_approximate_image_location(timezone_offset, locations_list, image_file_p
     image_time_utc = image_time - timedelta(hours=timezone_offset)
     image_time_unix = image_time_utc.timestamp()
 
-    image_location = Location(timestamp=image_time_unix, latitude=0, longitude=0)
+    image_location = Location(timestamp=image_time_unix, latitude="0", longitude="0")
     approx_location = find_closest_location_in_time(locations_list, image_location)
     hours_away = abs(approx_location.timestamp - image_time_unix) / 3600
     return date_time_original, approx_location, hours_away
@@ -337,9 +360,11 @@ def find_closest_location_in_time(
 
 def geotag_image(
     image_file_path: str, approx_location: Location
-) -> Tuple[float, float]:
+) -> Tuple[str, str]:
     lat_decimal = float(approx_location.latitude)
     lon_decimal = float(approx_location.longitude)
+    lat_value = normalize_gps_value(approx_location.latitude)
+    lon_value = normalize_gps_value(approx_location.longitude)
 
     with ExifToolHelper() as et:
         et.set_tags(
@@ -347,14 +372,14 @@ def geotag_image(
             tags={
                 "GPSVersionID": "2 2 0 0",
                 "GPSLatitudeRef": "S" if lat_decimal < 0 else "N",
-                "GPSLatitude": lat_decimal,
+                "GPSLatitude": lat_value,
                 "GPSLongitudeRef": "W" if lon_decimal < 0 else "E",
-                "GPSLongitude": lon_decimal,
+                "GPSLongitude": lon_value,
             },
             params=["-P", "-overwrite_original"],
         )
 
-    return (lat_decimal, lon_decimal)
+    return (lat_value, lon_value)
 
 
 def get_formatted_time_error(hours: float) -> str:
@@ -395,6 +420,10 @@ if __name__ == "__main__":
     total_images = len(image_file_names)
     index_width = len(str(total_images))
     name_width = max(len(name) for name in image_file_names)
+    coords_width = max(
+        (len(format_coords(loc.latitude, loc.longitude) or "-") for loc in locations_list),
+        default=len("-"),
+    )
 
     image_infos = []
 
@@ -406,7 +435,7 @@ if __name__ == "__main__":
         if existing_gps and not force_overwrite:
             latitude, longitude = existing_gps
             date_time_original = get_image_datetime(image_file_path)
-            coords_label = f"{_format_gps_value(latitude)}, {_format_gps_value(longitude)}"
+            coords_label = format_coords(latitude, longitude)
             print(
                 format_output_line(
                     index_label,
@@ -418,6 +447,7 @@ if __name__ == "__main__":
                     coords_label,
                     None,
                     "photo",
+                    coords_width,
                 )
             )
             image_infos.append(
@@ -452,6 +482,7 @@ if __name__ == "__main__":
                     None,
                     None,
                     None,
+                    coords_width,
                 )
             )
             image_infos.append(
@@ -467,11 +498,9 @@ if __name__ == "__main__":
         elif hours_away < error_hours:
             source_label = approx_location.source or "unknown"
             if dry_run:
-                latitude = float(approx_location.latitude)
-                longitude = float(approx_location.longitude)
-                coords_label = (
-                    f"{_format_gps_value(latitude)}, {_format_gps_value(longitude)}"
-                )
+                latitude = normalize_gps_value(approx_location.latitude)
+                longitude = normalize_gps_value(approx_location.longitude)
+                coords_label = format_coords(latitude, longitude)
                 action = "Would overwrite" if existing_gps else "Would geotag"
                 print(
                     format_output_line(
@@ -484,11 +513,12 @@ if __name__ == "__main__":
                         coords_label,
                         get_formatted_time_error(hours_away),
                         source_label,
+                        coords_width,
                     )
                 )
             else:
                 latitude, longitude = geotag_image(image_file_path, approx_location)
-                coords_label = f"{latitude}, {longitude}"
+                coords_label = format_coords(latitude, longitude)
                 print(
                     format_output_line(
                         index_label,
@@ -500,10 +530,9 @@ if __name__ == "__main__":
                         coords_label,
                         get_formatted_time_error(hours_away),
                         source_label,
+                        coords_width,
                     )
                 )
-                latitude = float(latitude)
-                longitude = float(longitude)
             image_infos.append(
                 {
                     "index": num,
@@ -527,6 +556,7 @@ if __name__ == "__main__":
                     None,
                     get_formatted_time_error(hours_away),
                     source_label,
+                    coords_width,
                 )
             )
             image_infos.append(
@@ -625,7 +655,10 @@ if __name__ == "__main__":
                 lat_input = input("Enter latitude: ").strip()
                 lon_input = input("Enter longitude: ").strip()
                 try:
-                    chosen_coords = (float(lat_input), float(lon_input))
+                    # Validate numeric input while preserving exact string precision.
+                    float(lat_input)
+                    float(lon_input)
+                    chosen_coords = (lat_input, lon_input)
                     chosen_source = "manual"
                     break
                 except ValueError:
@@ -656,9 +689,10 @@ if __name__ == "__main__":
                         image["name"],
                         name_width,
                         photo_time,
-                        f"{_format_gps_value(chosen_coords[0])}, {_format_gps_value(chosen_coords[1])}",
+                        format_coords(chosen_coords[0], chosen_coords[1]),
                         None,
                         chosen_source,
+                        coords_width,
                     )
                 )
             else:
@@ -673,8 +707,9 @@ if __name__ == "__main__":
                         image["name"],
                         name_width,
                         photo_time,
-                        f"{_format_gps_value(latitude)}, {_format_gps_value(longitude)}",
+                        format_coords(latitude, longitude),
                         None,
                         chosen_source,
+                        coords_width,
                     )
                 )
