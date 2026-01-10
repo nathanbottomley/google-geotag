@@ -32,6 +32,11 @@ WHITE_BACKGROUND = "\033[47m"
 RESET_FORMAT = "\033[0m"
 
 INCLUDED_FILE_EXTENSIONS = ["jpg", "JPG", "jpeg", "JPEG", "arw", "ARW"]
+TIME_FORMAT_WIDTH = 19
+GPS_COORDS_WIDTH = 25
+ACTION_WIDTH = len("Already geotagged")
+TIME_AWAY_WIDTH = 14
+SOURCE_WIDTH = len("subsequent photo")
 
 
 class Location(object):
@@ -113,6 +118,12 @@ def get_existing_gps(image_file_path):
         return None
 
 
+def get_image_datetime(image_file_path):
+    with ExifToolHelper() as et:
+        metadata = et.get_metadata(image_file_path)[0]
+    return metadata.get("EXIF:DateTimeOriginal")
+
+
 def geotag_image_with_coords(
     image_file_path: str, latitude: float, longitude: float
 ):
@@ -122,6 +133,34 @@ def geotag_image_with_coords(
 
 def format_index_label(index: int, total: int, index_width: int) -> str:
     return f"{index + 1:>{index_width}}/{total}"
+
+
+def format_output_line(
+    index_label: str,
+    action: str,
+    action_color: str,
+    name: str,
+    name_width: int,
+    photo_time: str,
+    coords: str,
+    time_away: str,
+    source: str,
+) -> str:
+    action_label = f"{action:<{ACTION_WIDTH}}"
+    name_label = f"{name:<{name_width}}"
+    time_label = f"{(photo_time or '-'): <{TIME_FORMAT_WIDTH}}"
+    coords_label = f"{(coords or '-'): <{GPS_COORDS_WIDTH}}"
+    time_away_label = f"{(time_away or '-'): <{TIME_AWAY_WIDTH}}"
+    source_label = f"{(source or '-'): <{SOURCE_WIDTH}}"
+    return (
+        f"{FAINT_TEXT}{index_label}{RESET_FORMAT}  "
+        f"{action_color}{BOLD_TEXT}{action_label}{RESET_FORMAT} "
+        f"{name_label}  "
+        f"{time_label}  "
+        f"{coords_label}  "
+        f"{time_away_label}  "
+        f"{source_label}"
+    )
 
 
 def read_image_file_names(image_dir):
@@ -362,13 +401,24 @@ if __name__ == "__main__":
     for num, image_file_name in enumerate(image_file_names):
         image_file_path = os.path.join(image_dir, image_file_name)
         index_label = format_index_label(num, total_images, index_width)
-        name_label = f"{image_file_name:<{name_width}}"
 
         existing_gps = get_existing_gps(image_file_path)
         if existing_gps and not force_overwrite:
             latitude, longitude = existing_gps
+            date_time_original = get_image_datetime(image_file_path)
+            coords_label = f"{_format_gps_value(latitude)}, {_format_gps_value(longitude)}"
             print(
-                f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {BLUE_TEXT}{BOLD_TEXT}Not Geotagged:{RESET_FORMAT} {name_label} - Already has GPS data {_format_gps_value(latitude)}, {_format_gps_value(longitude)}"
+                format_output_line(
+                    index_label,
+                    "Already geotagged",
+                    BLUE_TEXT,
+                    image_file_name,
+                    name_width,
+                    date_time_original,
+                    coords_label,
+                    None,
+                    "photo",
+                )
             )
             image_infos.append(
                 {
@@ -377,6 +427,7 @@ if __name__ == "__main__":
                     "path": image_file_path,
                     "status": "has_gps",
                     "coords": (latitude, longitude),
+                    "date_time_original": date_time_original,
                 }
             )
             continue
@@ -391,7 +442,17 @@ if __name__ == "__main__":
 
         if hours_away is None or approx_location is None or date_time_original is None:
             print(
-                f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {name_label} - No valid timestamp found."
+                format_output_line(
+                    index_label,
+                    "Not geotagged",
+                    RED_TEXT,
+                    image_file_name,
+                    name_width,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
             )
             image_infos.append(
                 {
@@ -400,6 +461,7 @@ if __name__ == "__main__":
                     "path": image_file_path,
                     "status": "untaggable",
                     "coords": None,
+                    "date_time_original": None,
                 }
             )
         elif hours_away < error_hours:
@@ -407,14 +469,38 @@ if __name__ == "__main__":
             if dry_run:
                 latitude = float(approx_location.latitude)
                 longitude = float(approx_location.longitude)
+                coords_label = (
+                    f"{_format_gps_value(latitude)}, {_format_gps_value(longitude)}"
+                )
                 action = "Would overwrite" if existing_gps else "Would geotag"
                 print(
-                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {CYAN_TEXT}{BOLD_TEXT}{action}:{RESET_FORMAT} {name_label} - {date_time_original} ({get_formatted_time_error(hours_away)}) [source: {source_label}]     {_format_gps_value(latitude)}, {_format_gps_value(longitude)}"
+                    format_output_line(
+                        index_label,
+                        action,
+                        CYAN_TEXT,
+                        image_file_name,
+                        name_width,
+                        date_time_original,
+                        coords_label,
+                        get_formatted_time_error(hours_away),
+                        source_label,
+                    )
                 )
             else:
                 latitude, longitude = geotag_image(image_file_path, approx_location)
+                coords_label = f"{latitude}, {longitude}"
                 print(
-                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {name_label} - {date_time_original} ({get_formatted_time_error(hours_away)}) [source: {source_label}]     {latitude}, {longitude}"
+                    format_output_line(
+                        index_label,
+                        "Geotagged",
+                        GREEN_TEXT,
+                        image_file_name,
+                        name_width,
+                        date_time_original,
+                        coords_label,
+                        get_formatted_time_error(hours_away),
+                        source_label,
+                    )
                 )
                 latitude = float(latitude)
                 longitude = float(longitude)
@@ -425,11 +511,23 @@ if __name__ == "__main__":
                     "path": image_file_path,
                     "status": "geotagged",
                     "coords": (latitude, longitude),
+                    "date_time_original": date_time_original,
                 }
             )
         else:
+            source_label = approx_location.source or "unknown"
             print(
-                f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {RED_TEXT}{BOLD_TEXT}Not geotagged.{RESET_FORMAT} {name_label} - {date_time_original} ({get_formatted_time_error(hours_away)})"
+                format_output_line(
+                    index_label,
+                    "Not geotagged",
+                    RED_TEXT,
+                    image_file_name,
+                    name_width,
+                    date_time_original,
+                    None,
+                    get_formatted_time_error(hours_away),
+                    source_label,
+                )
             )
             image_infos.append(
                 {
@@ -438,6 +536,7 @@ if __name__ == "__main__":
                     "path": image_file_path,
                     "status": "untaggable",
                     "coords": None,
+                    "date_time_original": date_time_original,
                 }
             )
 
@@ -547,15 +646,35 @@ if __name__ == "__main__":
             index_label = format_index_label(
                 image["index"], total_images, index_width
             )
-            name_label = f"{image['name']:<{name_width}}"
+            photo_time = image.get("date_time_original")
             if dry_run:
                 print(
-                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {CYAN_TEXT}{BOLD_TEXT}Would geotag:{RESET_FORMAT} {name_label} [source: {chosen_source}]     {_format_gps_value(chosen_coords[0])}, {_format_gps_value(chosen_coords[1])}"
+                    format_output_line(
+                        index_label,
+                        "Would geotag",
+                        CYAN_TEXT,
+                        image["name"],
+                        name_width,
+                        photo_time,
+                        f"{_format_gps_value(chosen_coords[0])}, {_format_gps_value(chosen_coords[1])}",
+                        None,
+                        chosen_source,
+                    )
                 )
             else:
                 latitude, longitude = geotag_image_with_coords(
                     image["path"], chosen_coords[0], chosen_coords[1]
                 )
                 print(
-                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {name_label} [source: {chosen_source}]     {_format_gps_value(latitude)}, {_format_gps_value(longitude)}"
+                    format_output_line(
+                        index_label,
+                        "Geotagged",
+                        GREEN_TEXT,
+                        image["name"],
+                        name_width,
+                        photo_time,
+                        f"{_format_gps_value(latitude)}, {_format_gps_value(longitude)}",
+                        None,
+                        chosen_source,
+                    )
                 )
