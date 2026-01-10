@@ -1,15 +1,15 @@
-# Geotagging using Google location history.
+# Geotagging using Google Maps app location history exports and nearby photo GPS.
 #
-# Command
-# python google-geotag.py --json {location history json file} --dir {photos directory}
+# Command:
+# python google-geotag.py --dir {photos directory}
 #
 # Input parameters:
 #
-#   -j JSON, --json JSON  The JSON file containing your location history.
-#   -d DIR, --dir DIR     Images folder.
-#   -t TIME, --time TIME  Hours of tolerance.
-#
-# Google Takeout Link: https://takeout.google.com/
+#   -d DIR, --dir DIR               Images folder.
+#   -e HOURS, --error_hours HOURS   Hours of tolerance.
+#   -tz OFFSET, --timezone OFFSET   Timezone offset to apply to photo times.
+#   -f, --force                     Overwrite existing GPS data.
+#   --dry-run                       Preview changes without writing.
 import argparse
 import json
 import os
