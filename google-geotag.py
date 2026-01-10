@@ -35,10 +35,13 @@ INCLUDED_FILE_EXTENSIONS = ["jpg", "JPG", "jpeg", "JPEG", "arw", "ARW"]
 
 
 class Location(object):
-    def __init__(self, timestamp: float, latitude: float, longitude: float):
+    def __init__(
+        self, timestamp: float, latitude: float, longitude: float, source: str = ""
+    ):
         self.timestamp = timestamp
         self.latitude = latitude
         self.longitude = longitude
+        self.source = source
 
     def get_timestamp(self, timestamp):
         if timestamp is None:
@@ -110,7 +113,9 @@ def get_existing_gps(image_file_path):
         return None
 
 
-def geotag_image_with_coords(image_file_path: str, latitude: float, longitude: float):
+def geotag_image_with_coords(
+    image_file_path: str, latitude: float, longitude: float
+):
     location = Location(timestamp=0, latitude=latitude, longitude=longitude)
     return geotag_image(image_file_path, location)
 
@@ -199,7 +204,7 @@ def load_locations(google_locations_file):
             # Compute the timestamp
             point_time = start_time + timedelta(minutes=duration_offset)
             timestamp = point_time.timestamp()
-            location = Location(timestamp, latitude, longitude)
+            location = Location(timestamp, latitude, longitude, source="google")
             locations_list.append(location)
 
     # Sort the locations list by timestamp
@@ -210,7 +215,43 @@ def load_locations(google_locations_file):
     return locations_list
 
 
+def load_photo_locations(image_file_names, image_dir, timezone_offset):
+    print(
+        f"Scanning existing photo GPS data ... {ITALIC_TEXT}{FAINT_TEXT}(can take a while){RESET_FORMAT}"
+    )
+    locations_list = []
+    image_paths = [os.path.join(image_dir, name) for name in image_file_names]
+    with ExifToolHelper() as et:
+        metadata_list = et.get_metadata(image_paths)
+
+    for metadata in metadata_list:
+        date_time_original = metadata.get("EXIF:DateTimeOriginal")
+        if not date_time_original:
+            continue
+        lat = metadata.get("Composite:GPSLatitude", metadata.get("EXIF:GPSLatitude"))
+        lon = metadata.get("Composite:GPSLongitude", metadata.get("EXIF:GPSLongitude"))
+        if lat is None or lon is None:
+            continue
+        try:
+            image_time = datetime.strptime(date_time_original, "%Y:%m:%d %H:%M:%S")
+            image_time_utc = image_time - timedelta(hours=timezone_offset)
+            timestamp = image_time_utc.timestamp()
+            latitude = float(lat)
+            longitude = float(lon)
+        except (ValueError, TypeError):
+            continue
+        locations_list.append(Location(timestamp, latitude, longitude, source="photo"))
+
+    locations_list.sort()
+    print(
+        f"{BLUE_TEXT}{BOLD_TEXT}{WHITE_BACKGROUND}Loaded {len(locations_list):,} photo GPS points{RESET_FORMAT}"
+    )
+    return locations_list
+
+
 def get_approximate_image_location(timezone_offset, locations_list, image_file_path):
+    if not locations_list:
+        return None, None, None
     with ExifToolHelper() as et:
         metadata = et.get_metadata(image_file_path)[0]
     date_time_original = metadata["EXIF:DateTimeOriginal"]
@@ -303,6 +344,14 @@ if __name__ == "__main__":
     image_file_names = read_image_file_names(image_dir)
 
     locations_list = load_locations(google_locations_file)
+    photo_locations = load_photo_locations(
+        image_file_names, image_dir, timezone_offset
+    )
+    locations_list.extend(photo_locations)
+    locations_list.sort()
+    print(
+        f"{BLUE_TEXT}{BOLD_TEXT}{WHITE_BACKGROUND}Total locations for matching: {len(locations_list):,}{RESET_FORMAT}"
+    )
 
     total_images = len(image_file_names)
     index_width = len(str(total_images))
@@ -354,17 +403,18 @@ if __name__ == "__main__":
                 }
             )
         elif hours_away < error_hours:
+            source_label = approx_location.source or "unknown"
             if dry_run:
                 latitude = float(approx_location.latitude)
                 longitude = float(approx_location.longitude)
                 action = "Would overwrite" if existing_gps else "Would geotag"
                 print(
-                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {CYAN_TEXT}{BOLD_TEXT}{action}:{RESET_FORMAT} {name_label} - {date_time_original} ({get_formatted_time_error(hours_away)})     {_format_gps_value(latitude)}, {_format_gps_value(longitude)}"
+                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {CYAN_TEXT}{BOLD_TEXT}{action}:{RESET_FORMAT} {name_label} - {date_time_original} ({get_formatted_time_error(hours_away)}) [source: {source_label}]     {_format_gps_value(latitude)}, {_format_gps_value(longitude)}"
                 )
             else:
                 latitude, longitude = geotag_image(image_file_path, approx_location)
                 print(
-                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {name_label} - {date_time_original} ({get_formatted_time_error(hours_away)})     {latitude}, {longitude}"
+                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {name_label} - {date_time_original} ({get_formatted_time_error(hours_away)}) [source: {source_label}]     {latitude}, {longitude}"
                 )
                 latitude = float(latitude)
                 longitude = float(longitude)
@@ -461,6 +511,7 @@ if __name__ == "__main__":
                     )
                     continue
                 chosen_coords = prev_coords
+                chosen_source = "previous photo"
                 break
             if choice == "2":
                 if not next_coords:
@@ -469,12 +520,14 @@ if __name__ == "__main__":
                     )
                     continue
                 chosen_coords = next_coords
+                chosen_source = "subsequent photo"
                 break
             if choice == "3":
                 lat_input = input("Enter latitude: ").strip()
                 lon_input = input("Enter longitude: ").strip()
                 try:
                     chosen_coords = (float(lat_input), float(lon_input))
+                    chosen_source = "manual"
                     break
                 except ValueError:
                     print(f"{RED_TEXT}Invalid coordinates.{RESET_FORMAT}")
@@ -497,12 +550,12 @@ if __name__ == "__main__":
             name_label = f"{image['name']:<{name_width}}"
             if dry_run:
                 print(
-                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {CYAN_TEXT}{BOLD_TEXT}Would geotag:{RESET_FORMAT} {name_label}     {_format_gps_value(chosen_coords[0])}, {_format_gps_value(chosen_coords[1])}"
+                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {CYAN_TEXT}{BOLD_TEXT}Would geotag:{RESET_FORMAT} {name_label} [source: {chosen_source}]     {_format_gps_value(chosen_coords[0])}, {_format_gps_value(chosen_coords[1])}"
                 )
             else:
                 latitude, longitude = geotag_image_with_coords(
                     image["path"], chosen_coords[0], chosen_coords[1]
                 )
                 print(
-                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {name_label}     {_format_gps_value(latitude)}, {_format_gps_value(longitude)}"
+                    f"{FAINT_TEXT}{index_label}{RESET_FORMAT} {GREEN_TEXT}{BOLD_TEXT}Geotagged:{RESET_FORMAT}  {name_label} [source: {chosen_source}]     {_format_gps_value(latitude)}, {_format_gps_value(longitude)}"
                 )
