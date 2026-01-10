@@ -151,7 +151,7 @@ def read_image_file_names(image_dir):
 
 def load_locations(google_locations_file):
     print(
-        f"Loading location data ... {ITALIC_TEXT}{FAINT_TEXT}(can take a while){RESET_FORMAT}"
+        f"Loading Google location data ... {ITALIC_TEXT}{FAINT_TEXT}(can take a while){RESET_FORMAT}"
     )
     with open(google_locations_file) as f:
         location_data = json.load(f)
@@ -210,7 +210,7 @@ def load_locations(google_locations_file):
     # Sort the locations list by timestamp
     locations_list.sort()
     print(
-        f"{BLUE_TEXT}{BOLD_TEXT}{WHITE_BACKGROUND}Loaded {len(locations_list):,} locations{RESET_FORMAT}"
+        f"{BLUE_TEXT}{BOLD_TEXT}Loaded {len(locations_list):,} locations{RESET_FORMAT}"
     )
     return locations_list
 
@@ -244,7 +244,7 @@ def load_photo_locations(image_file_names, image_dir, timezone_offset):
 
     locations_list.sort()
     print(
-        f"{BLUE_TEXT}{BOLD_TEXT}{WHITE_BACKGROUND}Loaded {len(locations_list):,} photo GPS points{RESET_FORMAT}"
+        f"{BLUE_TEXT}{BOLD_TEXT}Loaded {len(locations_list):,} photo GPS points{RESET_FORMAT}"
     )
     return locations_list
 
@@ -350,7 +350,7 @@ if __name__ == "__main__":
     locations_list.extend(photo_locations)
     locations_list.sort()
     print(
-        f"{BLUE_TEXT}{BOLD_TEXT}{WHITE_BACKGROUND}Total locations for matching: {len(locations_list):,}{RESET_FORMAT}"
+        f"{CYAN_TEXT}{BOLD_TEXT}{WHITE_BACKGROUND}Total locations for matching: {len(locations_list):,}{RESET_FORMAT}\n"
     )
 
     total_images = len(image_file_names)
@@ -462,7 +462,7 @@ if __name__ == "__main__":
         untaggable_batches.append(current_batch)
 
     if not untaggable_batches:
-        print(f"{GREEN_TEXT}{BOLD_TEXT}All images geotagged 🎉{RESET_FORMAT}")
+        print(f"\n{GREEN_TEXT}{BOLD_TEXT}All images geotagged 🎉{RESET_FORMAT}")
         exit()
 
     print(
