@@ -1,10 +1,8 @@
 # Google Geotag
 
-A python command-line application for geotagging photos using Google Takeout location history and existing GPS data from nearby photos.
+A python command-line application for geotagging photos using Google Maps app location history exports and existing GPS data from nearby photos.
 
-Download your location history JSON from:
-
-https://takeout.google.com/
+Export your location history JSON from the Google Maps app (Timeline).
 
 ## Requirements
 
@@ -27,7 +25,7 @@ Optional flags:
 ## How it works
 
 - Matches each photo timestamp to the nearest coordinates in time from:
-  - Google Takeout location history.
+  - Google Maps app location history exports.
   - GPS data already embedded in other photos in the same folder.
 - Skips photos that already have GPS data unless `--force` is used.
 - Groups consecutive untaggable photos into batches and asks once per batch how to resolve:
