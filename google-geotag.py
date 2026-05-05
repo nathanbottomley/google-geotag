@@ -7,17 +7,20 @@
 #
 #   -d DIR, --dir DIR               Images folder.
 #   -e HOURS, --error_hours HOURS   Hours of tolerance.
-#   -tz OFFSET, --timezone OFFSET   Timezone offset to apply to photo times.
+#   -tz OFFSET, --timezone OFFSET   Optional manual timezone offset override.
+#                                   Omit to auto-detect from photo location.
 #   -f, --force                     Overwrite existing GPS data.
 #   --dry-run                       Preview changes without writing.
 import argparse
 import json
 import os
 from bisect import bisect_left
-from datetime import datetime, timedelta
-from typing import List, Tuple
+from datetime import datetime, timedelta, timezone as dt_timezone
+from typing import List, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from exiftool import ExifToolHelper
+from timezonefinder import TimezoneFinder
 
 # Print formatting
 BOLD_TEXT = "\033[1m"
@@ -36,6 +39,57 @@ TIME_FORMAT_WIDTH = 19
 ACTION_WIDTH = len("Already geotagged")
 TIME_AWAY_WIDTH = 14
 SOURCE_WIDTH = len("subsequent photo")
+
+_tz_finder = TimezoneFinder()
+_zone_lookup_cache = {}
+
+
+def lookup_zone(latitude, longitude) -> Optional[str]:
+    try:
+        lat = float(latitude)
+        lon = float(longitude)
+    except (TypeError, ValueError):
+        return None
+    # Round to ~100m precision for caching — far finer than any zone boundary.
+    key = (round(lat, 3), round(lon, 3))
+    if key not in _zone_lookup_cache:
+        _zone_lookup_cache[key] = _tz_finder.timezone_at(lat=lat, lng=lon)
+    return _zone_lookup_cache[key]
+
+
+def format_zone_label(zone_name: Optional[str], reference_dt: datetime) -> str:
+    if zone_name is None:
+        return "unknown"
+    try:
+        zone = ZoneInfo(zone_name)
+    except ZoneInfoNotFoundError:
+        return zone_name
+    aware = reference_dt.replace(tzinfo=zone) if reference_dt.tzinfo is None else reference_dt.astimezone(zone)
+    offset_str = aware.strftime("%z")
+    if len(offset_str) >= 5:
+        offset_pretty = f"UTC{offset_str[:3]}:{offset_str[3:5]}"
+    else:
+        offset_pretty = "UTC?"
+    abbrev = aware.tzname() or ""
+    if abbrev and abbrev != zone_name:
+        return f"{zone_name} ({abbrev}, {offset_pretty})"
+    return f"{zone_name} ({offset_pretty})"
+
+
+def exif_local_to_utc_timestamp(naive_local: datetime, zone_name: Optional[str]) -> float:
+    if zone_name is None:
+        return naive_local.replace(tzinfo=dt_timezone.utc).timestamp()
+    try:
+        return naive_local.replace(tzinfo=ZoneInfo(zone_name)).timestamp()
+    except ZoneInfoNotFoundError:
+        return naive_local.replace(tzinfo=dt_timezone.utc).timestamp()
+
+
+def parse_exif_datetime(date_time_original: str) -> Optional[datetime]:
+    try:
+        return datetime.strptime(date_time_original, "%Y:%m:%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
 
 
 class Location(object):
@@ -84,14 +138,19 @@ def parse_arguments():
     parser.add_argument(
         "-tz",
         "--timezone",
-        help="Used for correcting timezone offsets as photos are not timezone aware.",
-        default=0,
+        help=(
+            "Optional manual timezone offset in hours (e.g. -5 or 1). "
+            "If omitted, the timezone is auto-detected from the photo's location "
+            "at the time it was taken, with daylight saving handled automatically."
+        ),
+        default=None,
         required=False,
     )
     args = vars(parser.parse_args())
     image_dir = args["dir"]
     error_hours = int(args["error_hours"])
-    timezone_offset = int(args["timezone"])
+    raw_offset = args["timezone"]
+    timezone_offset = float(raw_offset) if raw_offset is not None else None
     force_overwrite = args["force"]
     dry_run = args["dry_run"]
     return image_dir, error_hours, timezone_offset, force_overwrite, dry_run
@@ -275,7 +334,7 @@ def load_locations(google_locations_file):
     return locations_list
 
 
-def load_photo_locations(image_file_names, image_dir, timezone_offset):
+def load_photo_locations(image_file_names, image_dir, manual_offset_hours):
     print(
         f"Scanning existing photo GPS data ... {ITALIC_TEXT}{FAINT_TEXT}(can take a while){RESET_FORMAT}"
     )
@@ -292,16 +351,18 @@ def load_photo_locations(image_file_names, image_dir, timezone_offset):
         lon = metadata.get("Composite:GPSLongitude", metadata.get("EXIF:GPSLongitude"))
         if lat is None or lon is None:
             continue
-        try:
-            image_time = datetime.strptime(date_time_original, "%Y:%m:%d %H:%M:%S")
-            image_time_utc = image_time - timedelta(hours=timezone_offset)
-            timestamp = image_time_utc.timestamp()
-            latitude = normalize_gps_value(lat)
-            longitude = normalize_gps_value(lon)
-        except (ValueError, TypeError):
+        image_time = parse_exif_datetime(date_time_original)
+        if image_time is None:
             continue
+        latitude = normalize_gps_value(lat)
+        longitude = normalize_gps_value(lon)
         if latitude is None or longitude is None:
             continue
+        if manual_offset_hours is not None:
+            timestamp = (image_time - timedelta(hours=manual_offset_hours)).timestamp()
+        else:
+            zone_name = lookup_zone(latitude, longitude)
+            timestamp = exif_local_to_utc_timestamp(image_time, zone_name)
         locations_list.append(Location(timestamp, latitude, longitude, source="photo"))
 
     locations_list.sort()
@@ -311,32 +372,62 @@ def load_photo_locations(image_file_names, image_dir, timezone_offset):
     return locations_list
 
 
-def get_approximate_image_location(timezone_offset, locations_list, image_file_path):
+def get_approximate_image_location(
+    locations_list,
+    image_file_path,
+    hint_zone: Optional[str] = None,
+    manual_offset_hours: Optional[float] = None,
+):
     if not locations_list:
-        return None, None, None
+        return None, None, None, None
     with ExifToolHelper() as et:
         metadata = et.get_metadata(image_file_path)[0]
-    date_time_original = metadata["EXIF:DateTimeOriginal"]
+    date_time_original = metadata.get("EXIF:DateTimeOriginal")
     if not date_time_original:
         print(
             f"{RED_TEXT}Warning:{RESET_FORMAT} No DateTimeOriginal for {image_file_path}. Skipping."
         )
-        return None, None, None
-    try:
-        image_time = datetime.strptime(date_time_original, "%Y:%m:%d %H:%M:%S")
-    except ValueError:
+        return None, None, None, None
+    image_time = parse_exif_datetime(date_time_original)
+    if image_time is None:
         print(
             f"{RED_TEXT}Warning:{RESET_FORMAT} Invalid DateTimeOriginal format: {date_time_original}. Skipping."
         )
-        return None, None, None
-    # Adjust for timezone
-    image_time_utc = image_time - timedelta(hours=timezone_offset)
-    image_time_unix = image_time_utc.timestamp()
+        return None, None, None, None
 
-    image_location = Location(timestamp=image_time_unix, latitude="0", longitude="0")
-    approx_location = find_closest_location_in_time(locations_list, image_location)
+    if manual_offset_hours is not None:
+        image_time_unix = (image_time - timedelta(hours=manual_offset_hours)).timestamp()
+        approx_location = find_closest_location_in_time(
+            locations_list,
+            Location(timestamp=image_time_unix, latitude="0", longitude="0"),
+        )
+        hours_away = abs(approx_location.timestamp - image_time_unix) / 3600
+        return date_time_original, approx_location, hours_away, None
+
+    # Two-pass lookup: an initial guess gives us a rough location, which we use
+    # to identify the zone, which gives us a corrected UTC time, which we use
+    # for the real lookup. We iterate up to a few times in case the first guess
+    # was so wrong that it landed in the wrong zone — this converges quickly
+    # because zones are wider than the error from a single bad offset.
+    current_zone = hint_zone
+    image_time_unix = exif_local_to_utc_timestamp(image_time, current_zone)
+    approx_location = find_closest_location_in_time(
+        locations_list, Location(timestamp=image_time_unix, latitude="0", longitude="0")
+    )
+    for _ in range(3):
+        derived_zone = lookup_zone(approx_location.latitude, approx_location.longitude)
+        if derived_zone is None or derived_zone == current_zone:
+            current_zone = derived_zone or current_zone
+            break
+        current_zone = derived_zone
+        image_time_unix = exif_local_to_utc_timestamp(image_time, current_zone)
+        approx_location = find_closest_location_in_time(
+            locations_list,
+            Location(timestamp=image_time_unix, latitude="0", longitude="0"),
+        )
+
     hours_away = abs(approx_location.timestamp - image_time_unix) / 3600
-    return date_time_original, approx_location, hours_away
+    return date_time_original, approx_location, hours_away, current_zone
 
 
 def find_closest_location_in_time(
@@ -397,6 +488,28 @@ def get_formatted_time_error(hours: float) -> str:
     return f"{int(seconds)} sec away"
 
 
+def announce_zone(
+    new_zone: Optional[str],
+    previous_zone: Optional[str],
+    reference_dt: Optional[datetime],
+    image_name: str,
+) -> None:
+    if new_zone is None or new_zone == previous_zone:
+        return
+    ref = reference_dt or datetime.now()
+    label = format_zone_label(new_zone, ref)
+    if previous_zone is None:
+        print(
+            f"\n{CYAN_TEXT}{BOLD_TEXT}Detected starting timezone:{RESET_FORMAT} {label}\n"
+        )
+    else:
+        previous_label = format_zone_label(previous_zone, ref)
+        print(
+            f"\n{CYAN_TEXT}{BOLD_TEXT}Timezone change at {image_name}:{RESET_FORMAT} "
+            f"{previous_label} → {label}\n"
+        )
+
+
 if __name__ == "__main__":
 
     google_locations_file = "location-history.json"
@@ -426,6 +539,12 @@ if __name__ == "__main__":
     )
 
     image_infos = []
+    current_zone: Optional[str] = None
+    if timezone_offset is not None:
+        print(
+            f"\n{CYAN_TEXT}{BOLD_TEXT}Using manual timezone offset:{RESET_FORMAT} "
+            f"UTC{timezone_offset:+g} {FAINT_TEXT}(auto-detection disabled){RESET_FORMAT}\n"
+        )
 
     for num, image_file_name in enumerate(image_file_names):
         image_file_path = os.path.join(image_dir, image_file_name)
@@ -436,6 +555,16 @@ if __name__ == "__main__":
             latitude, longitude = existing_gps
             date_time_original = get_image_datetime(image_file_path)
             coords_label = format_coords(latitude, longitude)
+            if timezone_offset is None:
+                photo_zone = lookup_zone(latitude, longitude)
+                announce_zone(
+                    photo_zone,
+                    current_zone,
+                    parse_exif_datetime(date_time_original) if date_time_original else None,
+                    image_file_name,
+                )
+                if photo_zone is not None:
+                    current_zone = photo_zone
             print(
                 format_output_line(
                     index_label,
@@ -462,13 +591,22 @@ if __name__ == "__main__":
             )
             continue
 
-        date_time_original, approx_location, hours_away = (
+        date_time_original, approx_location, hours_away, detected_zone = (
             get_approximate_image_location(
-                timezone_offset,
                 locations_list,
                 image_file_path,
+                hint_zone=current_zone,
+                manual_offset_hours=timezone_offset,
             )
         )
+        if timezone_offset is None and detected_zone is not None:
+            announce_zone(
+                detected_zone,
+                current_zone,
+                parse_exif_datetime(date_time_original) if date_time_original else None,
+                image_file_name,
+            )
+            current_zone = detected_zone
 
         if hours_away is None or approx_location is None or date_time_original is None:
             print(
