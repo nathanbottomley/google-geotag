@@ -85,11 +85,43 @@ def exif_local_to_utc_timestamp(naive_local: datetime, zone_name: Optional[str])
         return naive_local.replace(tzinfo=dt_timezone.utc).timestamp()
 
 
+def manual_offset_to_utc_timestamp(naive_local: datetime, offset_hours: float) -> float:
+    """Convert a naive EXIF datetime to a UTC unix timestamp using a fixed hour offset."""
+    return (naive_local - timedelta(hours=offset_hours)).replace(tzinfo=dt_timezone.utc).timestamp()
+
+
 def parse_exif_datetime(date_time_original: str) -> Optional[datetime]:
     try:
         return datetime.strptime(date_time_original, "%Y:%m:%d %H:%M:%S")
     except (TypeError, ValueError):
         return None
+
+
+def parse_iso_to_utc(timestamp_str: str) -> Optional[datetime]:
+    """Parse an ISO 8601 timestamp (with Z, ±HH:MM, or naive) and return a UTC-aware datetime."""
+    if not timestamp_str:
+        return None
+    s = timestamp_str.replace("Z", "+00:00") if timestamp_str.endswith("Z") else timestamp_str
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=dt_timezone.utc)
+    return dt.astimezone(dt_timezone.utc)
+
+
+def parse_geo_point(geo_str: str) -> Optional[Tuple[str, str]]:
+    """Parse a 'geo:lat,lng' string. Returns (lat, lng) as strings preserving precision, or None."""
+    if not geo_str or not geo_str.startswith("geo:"):
+        return None
+    try:
+        lat_str, lon_str = geo_str[4:].split(",")
+        float(lat_str)
+        float(lon_str)
+    except ValueError:
+        return None
+    return lat_str, lon_str
 
 
 class Location(object):
@@ -261,6 +293,9 @@ def read_image_file_names(image_dir):
     return image_files
 
 
+VISIT_SAMPLE_INTERVAL = timedelta(minutes=10)
+
+
 def load_locations(google_locations_file):
     print(
         f"Loading Google location data ... {ITALIC_TEXT}{FAINT_TEXT}(can take a while){RESET_FORMAT}"
@@ -269,67 +304,85 @@ def load_locations(google_locations_file):
         location_data = json.load(f)
 
     locations_list = []
+    counts = {"timelinePath": 0, "visit": 0, "activity": 0}
 
     for entry in location_data:
-        # Handle entries with 'timelinePath' (New Format)
-        if not "timelinePath" in entry:
+        start_time = parse_iso_to_utc(entry.get("startTime"))
+        end_time = parse_iso_to_utc(entry.get("endTime"))
+        if start_time is None:
             continue
 
-        start_time_str = entry.get("startTime")
-        if not start_time_str:
-            continue
-        try:
-            start_time = datetime.strptime(start_time_str, "%Y-%m-%dT%H:%M:%S.%fZ")
-        except ValueError:
-            try:
-                start_time = datetime.strptime(start_time_str, "%Y-%m-%dT%H:%M:%SZ")
-            except ValueError:
-                print(
-                    f"{RED_TEXT}Warning:{RESET_FORMAT} Invalid startTime format: {start_time_str}"
+        if "timelinePath" in entry:
+            for point in entry["timelinePath"]:
+                coords = parse_geo_point(point.get("point", ""))
+                offset_str = point.get("durationMinutesOffsetFromStartTime")
+                if coords is None or offset_str is None:
+                    continue
+                try:
+                    offset_minutes = int(offset_str)
+                except ValueError:
+                    continue
+                point_time = start_time + timedelta(minutes=offset_minutes)
+                locations_list.append(
+                    Location(
+                        point_time.timestamp(),
+                        normalize_gps_value(coords[0]),
+                        normalize_gps_value(coords[1]),
+                        source="google",
+                    )
                 )
-                continue
+                counts["timelinePath"] += 1
 
-        timeline_path = entry.get("timelinePath", [])
-        for point in timeline_path:
-            point_str = point.get("point")
-            duration_offset_str = point.get("durationMinutesOffsetFromStartTime")
-            if not point_str or not duration_offset_str:
+        elif "visit" in entry and end_time is not None:
+            # Stationary at a single place across [startTime, endTime].
+            # Sample synthetic points across the visit so any photo taken
+            # during it finds a near-zero time delta.
+            place = entry["visit"].get("topCandidate", {}).get("placeLocation")
+            coords = parse_geo_point(place or "")
+            if coords is None:
                 continue
-            if not point_str.startswith("geo:"):
-                continue
-            try:
-                lat_str, lon_str = point_str[4:].split(",")
-                float(lat_str)
-                float(lon_str)
-                latitude = lat_str
-                longitude = lon_str
-            except ValueError:
-                print(
-                    f"{RED_TEXT}Warning:{RESET_FORMAT} Invalid point format: {point_str}"
-                )
-                continue
-            try:
-                duration_offset = int(duration_offset_str)
-            except ValueError:
-                print(
-                    f"{RED_TEXT}Warning:{RESET_FORMAT} Invalid duration offset: {duration_offset_str}"
-                )
-                continue
-            # Compute the timestamp
-            point_time = start_time + timedelta(minutes=duration_offset)
-            timestamp = point_time.timestamp()
-            location = Location(
-                timestamp,
-                normalize_gps_value(latitude),
-                normalize_gps_value(longitude),
-                source="google",
-            )
-            locations_list.append(location)
+            lat = normalize_gps_value(coords[0])
+            lon = normalize_gps_value(coords[1])
+            t = start_time
+            while t < end_time:
+                locations_list.append(Location(t.timestamp(), lat, lon, source="visit"))
+                counts["visit"] += 1
+                t += VISIT_SAMPLE_INTERVAL
+            locations_list.append(Location(end_time.timestamp(), lat, lon, source="visit"))
+            counts["visit"] += 1
 
-    # Sort the locations list by timestamp
+        elif "activity" in entry and end_time is not None:
+            # Movement from start to end. We anchor the endpoints in time;
+            # the path between is unknown so we don't interpolate.
+            activity = entry["activity"]
+            start_coords = parse_geo_point(activity.get("start", ""))
+            end_coords = parse_geo_point(activity.get("end", ""))
+            if start_coords is not None:
+                locations_list.append(
+                    Location(
+                        start_time.timestamp(),
+                        normalize_gps_value(start_coords[0]),
+                        normalize_gps_value(start_coords[1]),
+                        source="activity",
+                    )
+                )
+                counts["activity"] += 1
+            if end_coords is not None:
+                locations_list.append(
+                    Location(
+                        end_time.timestamp(),
+                        normalize_gps_value(end_coords[0]),
+                        normalize_gps_value(end_coords[1]),
+                        source="activity",
+                    )
+                )
+                counts["activity"] += 1
+
     locations_list.sort()
     print(
-        f"{BLUE_TEXT}{BOLD_TEXT}Loaded {len(locations_list):,} locations{RESET_FORMAT}"
+        f"{BLUE_TEXT}{BOLD_TEXT}Loaded {len(locations_list):,} locations{RESET_FORMAT} "
+        f"{FAINT_TEXT}(timeline: {counts['timelinePath']:,}, "
+        f"visits: {counts['visit']:,}, activities: {counts['activity']:,}){RESET_FORMAT}"
     )
     return locations_list
 
@@ -359,7 +412,7 @@ def load_photo_locations(image_file_names, image_dir, manual_offset_hours):
         if latitude is None or longitude is None:
             continue
         if manual_offset_hours is not None:
-            timestamp = (image_time - timedelta(hours=manual_offset_hours)).timestamp()
+            timestamp = manual_offset_to_utc_timestamp(image_time, manual_offset_hours)
         else:
             zone_name = lookup_zone(latitude, longitude)
             timestamp = exif_local_to_utc_timestamp(image_time, zone_name)
@@ -396,7 +449,7 @@ def get_approximate_image_location(
         return None, None, None, None
 
     if manual_offset_hours is not None:
-        image_time_unix = (image_time - timedelta(hours=manual_offset_hours)).timestamp()
+        image_time_unix = manual_offset_to_utc_timestamp(image_time, manual_offset_hours)
         approx_location = find_closest_location_in_time(
             locations_list,
             Location(timestamp=image_time_unix, latitude="0", longitude="0"),
