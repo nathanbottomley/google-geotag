@@ -11,6 +11,8 @@
 #                                   Omit to auto-detect from photo location.
 #   -f, --force                     Overwrite existing GPS data.
 #   --dry-run                       Preview changes without writing.
+#   --timeline PATH                 Path to the Google Timeline JSON.
+#                                   Defaults to ./location-history.json.
 import argparse
 import json
 import os
@@ -36,9 +38,10 @@ RESET_FORMAT = "\033[0m"
 
 INCLUDED_FILE_EXTENSIONS = ["jpg", "JPG", "jpeg", "JPEG", "arw", "ARW"]
 TIME_FORMAT_WIDTH = 19
-ACTION_WIDTH = len("Already geotagged")
+ACTION_WIDTH = len("Would override - unchanged")
 TIME_AWAY_WIDTH = 14
 SOURCE_WIDTH = len("subsequent photo")
+COORDS_EQUAL_EPSILON = 1e-6  # ~10cm; well below GPS noise floor
 
 _tz_finder = TimezoneFinder()
 _zone_lookup_cache = {}
@@ -157,7 +160,11 @@ def parse_arguments():
     parser.add_argument(
         "-f",
         "--force",
-        help="Overwrite GPS data if it already exists.",
+        help=(
+            "Force re-writing GPS tags even on photos that already have them. "
+            "Output distinguishes 'Overridden - changed' from "
+            "'Overridden - unchanged' so you can see which photos actually moved."
+        ),
         action="store_true",
         required=False,
     )
@@ -178,6 +185,12 @@ def parse_arguments():
         default=None,
         required=False,
     )
+    parser.add_argument(
+        "--timeline",
+        help="Path to the Google Timeline JSON. Defaults to ./location-history.json.",
+        default=None,
+        required=False,
+    )
     args = vars(parser.parse_args())
     image_dir = args["dir"]
     error_hours = int(args["error_hours"])
@@ -185,7 +198,8 @@ def parse_arguments():
     timezone_offset = float(raw_offset) if raw_offset is not None else None
     force_overwrite = args["force"]
     dry_run = args["dry_run"]
-    return image_dir, error_hours, timezone_offset, force_overwrite, dry_run
+    timeline_file = args["timeline"] or "location-history.json"
+    return image_dir, error_hours, timezone_offset, force_overwrite, dry_run, timeline_file
 
 
 def normalize_gps_value(value):
@@ -205,6 +219,18 @@ def format_coords(latitude, longitude):
     if lat_value is None or lon_value is None:
         return None
     return f"{lat_value}, {lon_value}"
+
+
+def gps_coords_equal(a, b) -> bool:
+    if a is None or b is None:
+        return a is b
+    try:
+        return (
+            abs(float(a[0]) - float(b[0])) < COORDS_EQUAL_EPSILON
+            and abs(float(a[1]) - float(b[1])) < COORDS_EQUAL_EPSILON
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 def get_existing_gps(image_file_path):
@@ -565,20 +591,26 @@ def announce_zone(
 
 if __name__ == "__main__":
 
-    google_locations_file = "location-history.json"
-
-    image_dir, error_hours, timezone_offset, force_overwrite, dry_run = (
+    image_dir, error_hours, timezone_offset, force_overwrite, dry_run, google_locations_file = (
         parse_arguments()
     )
 
     image_file_names = read_image_file_names(image_dir)
 
     locations_list = load_locations(google_locations_file)
-    photo_locations = load_photo_locations(
-        image_file_names, image_dir, timezone_offset
-    )
-    locations_list.extend(photo_locations)
-    locations_list.sort()
+    if force_overwrite:
+        # With --force every photo will be re-derived from external sources,
+        # so including their existing GPS in the matching pool would just
+        # cause each photo to match itself.
+        print(
+            f"{FAINT_TEXT}Skipping existing photo GPS pool (force mode){RESET_FORMAT}"
+        )
+    else:
+        photo_locations = load_photo_locations(
+            image_file_names, image_dir, timezone_offset
+        )
+        locations_list.extend(photo_locations)
+        locations_list.sort()
     print(
         f"{CYAN_TEXT}{BOLD_TEXT}{WHITE_BACKGROUND}Total locations for matching: {len(locations_list):,}{RESET_FORMAT}\n"
     )
@@ -688,42 +720,41 @@ if __name__ == "__main__":
             )
         elif hours_away < error_hours:
             source_label = approx_location.source or "unknown"
+            new_coords = (
+                normalize_gps_value(approx_location.latitude),
+                normalize_gps_value(approx_location.longitude),
+            )
+            if existing_gps:
+                unchanged = gps_coords_equal(existing_gps, new_coords)
+                if dry_run:
+                    action = "Would override - unchanged" if unchanged else "Would override - changed"
+                    action_color = CYAN_TEXT
+                else:
+                    action = "Overridden - unchanged" if unchanged else "Overridden - changed"
+                    action_color = BLUE_TEXT if unchanged else GREEN_TEXT
+            else:
+                action = "Would geotag" if dry_run else "Geotagged"
+                action_color = CYAN_TEXT if dry_run else GREEN_TEXT
+
             if dry_run:
-                latitude = normalize_gps_value(approx_location.latitude)
-                longitude = normalize_gps_value(approx_location.longitude)
-                coords_label = format_coords(latitude, longitude)
-                action = "Would overwrite" if existing_gps else "Would geotag"
-                print(
-                    format_output_line(
-                        index_label,
-                        action,
-                        CYAN_TEXT,
-                        image_file_name,
-                        name_width,
-                        date_time_original,
-                        coords_label,
-                        get_formatted_time_error(hours_away),
-                        source_label,
-                        coords_width,
-                    )
-                )
+                latitude, longitude = new_coords
             else:
                 latitude, longitude = geotag_image(image_file_path, approx_location)
-                coords_label = format_coords(latitude, longitude)
-                print(
-                    format_output_line(
-                        index_label,
-                        "Geotagged",
-                        GREEN_TEXT,
-                        image_file_name,
-                        name_width,
-                        date_time_original,
-                        coords_label,
-                        get_formatted_time_error(hours_away),
-                        source_label,
-                        coords_width,
-                    )
+            coords_label = format_coords(latitude, longitude)
+            print(
+                format_output_line(
+                    index_label,
+                    action,
+                    action_color,
+                    image_file_name,
+                    name_width,
+                    date_time_original,
+                    coords_label,
+                    get_formatted_time_error(hours_away),
+                    source_label,
+                    coords_width,
                 )
+            )
             image_infos.append(
                 {
                     "index": num,
