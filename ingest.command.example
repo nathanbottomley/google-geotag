@@ -1,0 +1,18 @@
+#!/bin/bash
+# Template launcher for ingest.py.
+#
+# To use:
+#   1. Copy this file to `ingest.command` (it's gitignored so your absolute
+#      paths stay out of the repo).
+#   2. Edit the two paths below to match your machine.
+#   3. Make it executable: `chmod +x ingest.command`
+#   4. Double-click it, or trigger via Spotlight/Raycast/Alfred.
+#
+# The trailing `read` keeps the Terminal window open after the script finishes,
+# so output stays visible even if Terminal is set to close on exit.
+
+cd "/absolute/path/to/this/repo"
+"/absolute/path/to/your/python" ingest.py "$@"
+echo
+read -n 1 -s -r -p "Press any key to close…"
+echo
