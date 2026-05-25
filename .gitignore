@@ -5,3 +5,4 @@ profile.svg
 location-history.json
 __pycache__/
 *.pyc
+*.command

@@ -36,6 +36,8 @@ MAC_FALLBACK = Path.home() / "Pictures" / "Sony Inbox" / "Sony"
 DOWNLOADS = Path.home() / "Downloads"
 TIMELINE_GLOB = "location-history*.json"
 
+PENDING_MARKER = ".needs-geotag"
+
 REPO_ROOT = Path(__file__).resolve().parent
 GEOTAG_SCRIPT = REPO_ROOT / "google-geotag.py"
 
@@ -221,6 +223,56 @@ def determine_video_destinations(new_videos: List[MediaFile], dest_root: Path) -
     }
 
 
+def write_pending_marker(batch_dir: Path) -> None:
+    (batch_dir / PENDING_MARKER).write_text(
+        "Photos in this batch are awaiting geotagging.\n"
+        f"Created {datetime.now().isoformat(timespec='seconds')}.\n"
+    )
+
+
+def remove_pending_marker(batch_dir: Path) -> None:
+    try:
+        (batch_dir / PENDING_MARKER).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def find_pending_batches(dest_root: Path) -> List[Path]:
+    raw = dest_root / "RAW"
+    if not raw.is_dir():
+        return []
+    return sorted(m.parent for m in raw.rglob(PENDING_MARKER) if m.is_file())
+
+
+def batch_photo_dates(batch_dir: Path) -> Tuple[Optional[date], Optional[date]]:
+    dates = []
+    for p in batch_dir.iterdir():
+        if not p.is_file() or p.name.startswith("."):
+            continue
+        if p.suffix.lower() in PHOTO_EXTS:
+            d = datetime.fromtimestamp(p.stat().st_mtime, tz=dt_timezone.utc).date()
+            dates.append(d)
+    if not dates:
+        return None, None
+    return min(dates), max(dates)
+
+
+def covers(
+    timeline_start: Optional[datetime],
+    timeline_end: Optional[datetime],
+    min_date: Optional[date],
+    max_date: Optional[date],
+) -> bool:
+    if (
+        timeline_start is None
+        or timeline_end is None
+        or min_date is None
+        or max_date is None
+    ):
+        return False
+    return timeline_start.date() <= min_date and max_date <= timeline_end.date()
+
+
 def copy_with_verify(src: Path, dst: Path) -> None:
     """Copy src → dst and SHA-1 verify. Raises RuntimeError on mismatch."""
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -317,21 +369,37 @@ def parse_arguments():
     return parser.parse_args()
 
 
+def _geotag_status(will_geotag: bool, no_geotag_flag: bool) -> str:
+    if will_geotag:
+        return f"{GREEN}✓ will geotag now{RESET}"
+    if no_geotag_flag:
+        return f"{FAINT}--no-geotag → leaving pending{RESET}"
+    return f"{YELLOW}! not covered → leaving pending{RESET}"
+
+
+def _date_span(pmin: Optional[date], pmax: Optional[date]) -> str:
+    if pmin is None or pmax is None:
+        return "?"
+    if pmin == pmax:
+        return f"{pmin}{relative_date_suffix(pmin)}"
+    return f"{pmin} → {pmax}{relative_date_suffix(pmax)}"
+
+
 def print_analysis(
     sd: Path,
     photos: List[MediaFile],
     videos: List[MediaFile],
     dest_root: Path,
     dest_mounted: bool,
-    known_names: set,
+    known: set,
     new_photos: List[MediaFile],
     new_videos: List[MediaFile],
-    photo_dests: dict,
+    new_batch_plans: list,
     video_dests: dict,
+    pending_plans: list,
     timeline: Optional[Path],
     timeline_start: Optional[datetime],
     timeline_end: Optional[datetime],
-    can_geotag: bool,
     no_geotag_flag: bool,
 ) -> None:
     print(f"{BOLD}SD card:{RESET}     {sd.name} ({sd})")
@@ -347,51 +415,48 @@ def print_analysis(
     print(f"{BOLD}Destination:{RESET} {dest_root}  {dest_label}")
     print()
 
-    print_per_date_breakdown("Photos", photos, known_names)
-    print_per_date_breakdown("Videos", videos, known_names)
+    print_per_date_breakdown("Photos", photos, known)
+    print_per_date_breakdown("Videos", videos, known)
 
     if new_photos or new_videos:
         print(f"{BOLD}New on SD:{RESET}")
-        for (year, month), files in sorted(group_by_month(new_photos).items()):
-            target = photo_dests[(year, month)]
+        for dest_dir, files, _, _, will_geotag in new_batch_plans:
             print(
-                f"  {GREEN}{len(files):>4}{RESET} photos → {relative_to_dest(target, dest_root)}/"
+                f"  {GREEN}{len(files):>4}{RESET} photos → "
+                f"{relative_to_dest(dest_dir, dest_root)}/  "
+                f"{_geotag_status(will_geotag, no_geotag_flag)}"
             )
         for (year, month), files in sorted(group_by_month(new_videos).items()):
             target = video_dests[(year, month)]
             print(
-                f"  {GREEN}{len(files):>4}{RESET} videos → {relative_to_dest(target, dest_root)}/"
+                f"  {GREEN}{len(files):>4}{RESET} videos → "
+                f"{relative_to_dest(target, dest_root)}/"
+            )
+        print()
+
+    if pending_plans:
+        print(f"{BOLD}Pending geotag (from earlier imports):{RESET}")
+        for batch_dir, pmin, pmax, will_geotag in pending_plans:
+            print(
+                f"  {relative_to_dest(batch_dir, dest_root)}/  "
+                f"{FAINT}{_date_span(pmin, pmax)}{RESET}  "
+                f"{_geotag_status(will_geotag, no_geotag_flag)}"
             )
         print()
 
     if timeline is None:
         print(f"{BOLD}Timeline export:{RESET} {YELLOW}not found in ~/Downloads/{RESET}")
-        print("  Will import only — run geotag later when you have an export.")
     elif timeline_start is None or timeline_end is None:
         print(
             f"{BOLD}Timeline export:{RESET} {timeline.name}  "
             f"{YELLOW}(could not read time range){RESET}"
         )
-        print("  Will import only.")
     else:
         end_suffix = relative_date_suffix(timeline_end.date())
         print(f"{BOLD}Timeline export:{RESET} {timeline.name}")
         print(
             f"  Coverage: {timeline_start.date()} → {timeline_end.date()}{end_suffix}"
         )
-        if not new_photos:
-            print(f"  {FAINT}no new photos to geotag{RESET}")
-        elif can_geotag:
-            print(f"  {GREEN}✓ covers new photos → will geotag after import{RESET}")
-        elif no_geotag_flag:
-            print(f"  {FAINT}--no-geotag set; will import only{RESET}")
-        else:
-            photo_min = min(f.mtime.date() for f in new_photos)
-            photo_max = max(f.mtime.date() for f in new_photos)
-            print(
-                f"  {YELLOW}does not fully cover new photos "
-                f"({photo_min} → {photo_max}) — will import only{RESET}"
-            )
     print()
 
 
@@ -419,19 +484,30 @@ def main() -> int:
     if timeline is not None:
         timeline_start, timeline_end = timeline_range(timeline)
 
-    can_geotag = False
-    if (
-        not args.no_geotag
-        and timeline is not None
-        and timeline_start is not None
-        and timeline_end is not None
-        and new_photos
-    ):
-        photo_min = min(f.mtime.date() for f in new_photos)
-        photo_max = max(f.mtime.date() for f in new_photos)
-        can_geotag = (
-            timeline_start.date() <= photo_min and photo_max <= timeline_end.date()
+    # Per-batch coverage for new photos. A multi-month ingest can end up with
+    # one month covered by the Timeline export and another not, so we decide
+    # batch-by-batch rather than all-or-nothing.
+    new_batch_plans = []  # (dest_dir, files, min_date, max_date, will_geotag)
+    for (year, month), files in sorted(group_by_month(new_photos).items()):
+        pmin = min(f.mtime.date() for f in files)
+        pmax = max(f.mtime.date() for f in files)
+        will_geotag = (
+            not args.no_geotag
+            and timeline is not None
+            and covers(timeline_start, timeline_end, pmin, pmax)
         )
+        new_batch_plans.append((photo_dests[(year, month)], files, pmin, pmax, will_geotag))
+
+    # Pending batches from previous ingests that didn't geotag.
+    pending_plans = []  # (batch_dir, min_date, max_date, will_geotag)
+    for batch in find_pending_batches(dest_root):
+        pmin, pmax = batch_photo_dates(batch)
+        will_geotag = (
+            not args.no_geotag
+            and timeline is not None
+            and covers(timeline_start, timeline_end, pmin, pmax)
+        )
+        pending_plans.append((batch, pmin, pmax, will_geotag))
 
     print_analysis(
         sd,
@@ -442,17 +518,21 @@ def main() -> int:
         known,
         new_photos,
         new_videos,
-        photo_dests,
+        new_batch_plans,
         video_dests,
+        pending_plans,
         timeline,
         timeline_start,
         timeline_end,
-        can_geotag,
         args.no_geotag,
     )
 
-    if not new_photos and not new_videos:
-        print(f"{BLUE}Nothing to import.{RESET}")
+    has_new = bool(new_photos or new_videos)
+    has_geotag_work = any(p[4] for p in new_batch_plans) or any(
+        p[3] for p in pending_plans
+    )
+    if not has_new and not has_geotag_work:
+        print(f"{BLUE}Nothing to do.{RESET}")
         return 0
 
     if not args.no_confirm:
@@ -467,50 +547,65 @@ def main() -> int:
             return 0
     print()
 
-    all_new = new_photos + new_videos
-    total = len(all_new)
-    width = len(str(total))
-    for i, f in enumerate(all_new, start=1):
-        dst_dir = (
-            photo_dests[(f.year, f.month)]
-            if f.is_photo
-            else video_dests[(f.year, f.month)]
-        )
-        dst = dst_dir / f.name
-        try:
-            copy_with_verify(f.path, dst)
-        except (OSError, RuntimeError) as exc:
-            print(f"  {RED}✗ {f.name}{RESET} — {exc}")
-            return 1
+    if has_new:
+        all_new = new_photos + new_videos
+        total = len(all_new)
+        width = len(str(total))
+        for i, f in enumerate(all_new, start=1):
+            dst_dir = (
+                photo_dests[(f.year, f.month)]
+                if f.is_photo
+                else video_dests[(f.year, f.month)]
+            )
+            dst = dst_dir / f.name
+            try:
+                copy_with_verify(f.path, dst)
+            except (OSError, RuntimeError) as exc:
+                print(f"  {RED}✗ {f.name}{RESET} — {exc}")
+                return 1
+            print(
+                f"  {GREEN}✓{RESET} [{i:>{width}}/{total}] {f.name}  "
+                f"{FAINT}→ {relative_to_dest(dst, dest_root)}{RESET}"
+            )
+        print()
         print(
-            f"  {GREEN}✓{RESET} [{i:>{width}}/{total}] {f.name}  "
-            f"{FAINT}→ {relative_to_dest(dst, dest_root)}{RESET}"
+            f"{GREEN}{BOLD}Imported {len(new_photos)} photos and {len(new_videos)} videos.{RESET}"
         )
 
-    print()
-    print(
-        f"{GREEN}{BOLD}Imported {len(new_photos)} photos and {len(new_videos)} videos.{RESET}"
-    )
+        # Mark any new photo batch that's not being geotagged this run, so it
+        # gets picked up on a later ingest when a covering Timeline export exists.
+        for dest_dir, _, _, _, will_geotag in new_batch_plans:
+            if not will_geotag:
+                write_pending_marker(dest_dir)
 
-    if can_geotag and photo_dests:
+    geotag_targets = [
+        (dest_dir, True) for dest_dir, _, _, _, will in new_batch_plans if will
+    ] + [(batch, False) for batch, _, _, will in pending_plans if will]
+
+    if geotag_targets:
         print()
         print(f"{BOLD}Geotagging...{RESET}")
-        for dest_dir in photo_dests.values():
-            print(f"\n{CYAN}→ {relative_to_dest(dest_dir, dest_root)}{RESET}")
+        for batch_dir, is_new in geotag_targets:
+            label = "new" if is_new else "pending"
+            print(
+                f"\n{CYAN}→ {relative_to_dest(batch_dir, dest_root)}{RESET} "
+                f"{FAINT}({label}){RESET}"
+            )
             result = subprocess.run(
                 [
                     sys.executable,
                     str(GEOTAG_SCRIPT),
                     "--dir",
-                    str(dest_dir),
+                    str(batch_dir),
                     "--timeline",
                     str(timeline),
                 ],
                 cwd=str(REPO_ROOT),
             )
             if result.returncode != 0:
-                print(f"{RED}Geotag failed for {dest_dir}.{RESET}")
+                print(f"{RED}Geotag failed for {batch_dir}.{RESET}")
                 return 1
+            remove_pending_marker(batch_dir)
 
     return 0
 
