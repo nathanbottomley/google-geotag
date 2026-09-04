@@ -34,14 +34,31 @@ SSD_PHOTOS = SSD_ROOT / "Photos" / "Sony"
 MAC_FALLBACK = Path.home() / "Pictures" / "Sony Inbox" / "Sony"
 
 DOWNLOADS = Path.home() / "Downloads"
-TIMELINE_GLOB = "location-history*.json"
+# Google has used both names for the Timeline export over time.
+TIMELINE_GLOBS = ("location-history*.json", "Timeline*.json")
 
 PENDING_MARKER = ".needs-geotag"
+
+# Photos taken after midnight but before this hour are filed with the previous
+# day, so a shoot that runs past midnight stays in one folder.
+DAY_ROLLOVER_HOUR = 4
 
 REPO_ROOT = Path(__file__).resolve().parent
 GEOTAG_SCRIPT = REPO_ROOT / "google-geotag.py"
 
 COPY_CHUNK = 1 << 20
+
+
+def file_mtime(path: Path, st_mtime: Optional[float] = None) -> datetime:
+    """Modification time as a local-timezone datetime (see MediaFile.__init__)."""
+    if st_mtime is None:
+        st_mtime = path.stat().st_mtime
+    return datetime.fromtimestamp(st_mtime).astimezone()
+
+
+def shoot_date(dt: datetime) -> date:
+    """Calendar day for filing: times before DAY_ROLLOVER_HOUR count as the day before."""
+    return (dt - timedelta(hours=DAY_ROLLOVER_HOUR)).date()
 
 
 class MediaFile:
@@ -50,10 +67,11 @@ class MediaFile:
         self.name = path.name
         stat = path.stat()
         self.size = stat.st_size
-        # SD-card mtimes are written by the camera as wallclock seconds-since-epoch.
-        # We only use this for grouping by year/month and showing a date range,
-        # so reading it as UTC is "close enough" without needing exiftool here.
-        self.mtime = datetime.fromtimestamp(stat.st_mtime, tz=dt_timezone.utc)
+        # The camera stamps files with its wallclock, which macOS exposes as the
+        # correct instant. Reading it in the Mac's local timezone gives back that
+        # wallclock (as long as camera and Mac share a timezone), which is what
+        # we need to file photos under the right day without calling exiftool.
+        self.mtime = file_mtime(path, stat.st_mtime)
 
     @property
     def ext(self) -> str:
@@ -68,12 +86,21 @@ class MediaFile:
         return self.ext in VIDEO_EXTS
 
     @property
+    def shoot_date(self) -> date:
+        """The day this file is filed under (see DAY_ROLLOVER_HOUR)."""
+        return shoot_date(self.mtime)
+
+    @property
     def year(self) -> int:
-        return self.mtime.year
+        return self.shoot_date.year
 
     @property
     def month(self) -> int:
-        return self.mtime.month
+        return self.shoot_date.month
+
+    @property
+    def day(self) -> int:
+        return self.shoot_date.day
 
 
 def find_sd_card() -> Optional[Path]:
@@ -140,13 +167,12 @@ def index_destination(dest_root: Path) -> set:
             continue
         for p in sub.rglob("*"):
             if p.is_file():
-                d = datetime.fromtimestamp(p.stat().st_mtime, tz=dt_timezone.utc).date()
-                known.add((p.name, d))
+                known.add((p.name, file_mtime(p).date()))
     return known
 
 
 def find_timeline_file() -> Optional[Path]:
-    matches = list(DOWNLOADS.glob(TIMELINE_GLOB))
+    matches = [m for g in TIMELINE_GLOBS for m in DOWNLOADS.glob(g)]
     if not matches:
         return None
     return max(matches, key=lambda p: p.stat().st_mtime)
@@ -185,19 +211,6 @@ def timeline_range(path: Path) -> Tuple[Optional[datetime], Optional[datetime]]:
     return earliest, latest
 
 
-def next_batch_number(month_dir: Path) -> int:
-    if not month_dir.exists():
-        return 1
-    nums = []
-    for entry in month_dir.iterdir():
-        if entry.is_dir() and entry.name.startswith("Batch "):
-            try:
-                nums.append(int(entry.name.split(" ", 1)[1]))
-            except (ValueError, IndexError):
-                pass
-    return max(nums, default=0) + 1
-
-
 def group_by_month(files: Iterable[MediaFile]) -> dict:
     groups: dict = {}
     for f in files:
@@ -205,14 +218,24 @@ def group_by_month(files: Iterable[MediaFile]) -> dict:
     return groups
 
 
+def group_by_day(files: Iterable[MediaFile]) -> dict:
+    groups: dict = {}
+    for f in files:
+        groups.setdefault((f.year, f.month, f.day), []).append(f)
+    return groups
+
+
 def determine_photo_destinations(new_photos: List[MediaFile], dest_root: Path) -> dict:
-    """Returns (year, month) -> batch_dir for each month containing new photos."""
-    result = {}
-    for (year, month) in group_by_month(new_photos).keys():
-        month_dir = dest_root / "RAW" / str(year) / str(month)
-        n = next_batch_number(month_dir)
-        result[(year, month)] = month_dir / f"Batch {n}"
-    return result
+    """Returns (year, month, day) -> RAW/<year>/<month>/<day> for each day with new photos.
+
+    Day folders are stable across runs: a second ingest covering the same day
+    adds to the existing folder rather than creating a new one. Re-geotagging a
+    folder is safe because google-geotag skips photos that already have GPS.
+    """
+    return {
+        (year, month, day): dest_root / "RAW" / str(year) / str(month) / str(day)
+        for (year, month, day) in group_by_day(new_photos).keys()
+    }
 
 
 def determine_video_destinations(new_videos: List[MediaFile], dest_root: Path) -> dict:
@@ -225,7 +248,7 @@ def determine_video_destinations(new_videos: List[MediaFile], dest_root: Path) -
 
 def write_pending_marker(batch_dir: Path) -> None:
     (batch_dir / PENDING_MARKER).write_text(
-        "Photos in this batch are awaiting geotagging.\n"
+        "Photos in this folder are awaiting geotagging.\n"
         f"Created {datetime.now().isoformat(timespec='seconds')}.\n"
     )
 
@@ -250,8 +273,7 @@ def batch_photo_dates(batch_dir: Path) -> Tuple[Optional[date], Optional[date]]:
         if not p.is_file() or p.name.startswith("."):
             continue
         if p.suffix.lower() in PHOTO_EXTS:
-            d = datetime.fromtimestamp(p.stat().st_mtime, tz=dt_timezone.utc).date()
-            dates.append(d)
+            dates.append(file_mtime(p).date())
     if not dates:
         return None, None
     return min(dates), max(dates)
@@ -312,7 +334,7 @@ def relative_date_suffix(d: date) -> str:
 def date_range_label(files: List[MediaFile]) -> str:
     if not files:
         return "-"
-    dates = sorted({f.mtime.date() for f in files})
+    dates = sorted({f.shoot_date for f in files})
     if len(dates) == 1:
         return f"{dates[0]}{relative_date_suffix(dates[0])}"
     return f"{dates[0]} → {dates[-1]}{relative_date_suffix(dates[-1])}"
@@ -325,7 +347,7 @@ def print_per_date_breakdown(
         return
     by_date: dict = {}
     for f in files:
-        by_date.setdefault(f.mtime.date(), []).append(f)
+        by_date.setdefault(f.shoot_date, []).append(f)
     print(f"{BOLD}{label} by date:{RESET}")
     for d in sorted(by_date.keys()):
         items = by_date[d]
@@ -369,12 +391,33 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def _geotag_status(will_geotag: bool, no_geotag_flag: bool) -> str:
+def _geotag_status(
+    will_geotag: bool,
+    no_geotag_flag: bool,
+    timeline: Optional[Path],
+    timeline_start: Optional[datetime],
+    timeline_end: Optional[datetime],
+    pmin: Optional[date],
+    pmax: Optional[date],
+) -> str:
+    """Explain why a batch will or won't be geotagged in this run."""
     if will_geotag:
         return f"{GREEN}✓ will geotag now{RESET}"
     if no_geotag_flag:
-        return f"{FAINT}--no-geotag → leaving pending{RESET}"
-    return f"{YELLOW}! not covered → leaving pending{RESET}"
+        return f"{FAINT}--no-geotag → will geotag on a later ingest{RESET}"
+    if timeline is None:
+        return f"{YELLOW}! no Timeline export found → will geotag on a later ingest{RESET}"
+    if timeline_start is None or timeline_end is None:
+        return f"{YELLOW}! Timeline export unreadable → will geotag on a later ingest{RESET}"
+    if pmin is None or pmax is None:
+        return f"{YELLOW}! no photo dates found → will geotag on a later ingest{RESET}"
+    gaps = []
+    if pmin < timeline_start.date():
+        gaps.append(f"photos start {pmin}, Timeline starts {timeline_start.date()}")
+    if pmax > timeline_end.date():
+        gaps.append(f"photos run to {pmax}, Timeline ends {timeline_end.date()}")
+    reason = "; ".join(gaps) or "outside Timeline export range"
+    return f"{YELLOW}! {reason} → will geotag on a later ingest{RESET}"
 
 
 def _date_span(pmin: Optional[date], pmax: Optional[date]) -> str:
@@ -420,11 +463,11 @@ def print_analysis(
 
     if new_photos or new_videos:
         print(f"{BOLD}New on SD:{RESET}")
-        for dest_dir, files, _, _, will_geotag in new_batch_plans:
+        for dest_dir, files, pmin, pmax, will_geotag in new_batch_plans:
             print(
                 f"  {GREEN}{len(files):>4}{RESET} photos → "
                 f"{relative_to_dest(dest_dir, dest_root)}/  "
-                f"{_geotag_status(will_geotag, no_geotag_flag)}"
+                f"{_geotag_status(will_geotag, no_geotag_flag, timeline, timeline_start, timeline_end, pmin, pmax)}"
             )
         for (year, month), files in sorted(group_by_month(new_videos).items()):
             target = video_dests[(year, month)]
@@ -440,12 +483,30 @@ def print_analysis(
             print(
                 f"  {relative_to_dest(batch_dir, dest_root)}/  "
                 f"{FAINT}{_date_span(pmin, pmax)}{RESET}  "
-                f"{_geotag_status(will_geotag, no_geotag_flag)}"
+                f"{_geotag_status(will_geotag, no_geotag_flag, timeline, timeline_start, timeline_end, pmin, pmax)}"
             )
         print()
 
+    not_covered = (
+        not no_geotag_flag
+        and (
+            any(not p[4] for p in new_batch_plans)
+            or any(not p[3] for p in pending_plans)
+        )
+    )
+    if not_covered:
+        print(
+            f"{FAINT}Folders marked ! fall outside the Timeline export's date range, so "
+            f"they're copied but not geotagged. Export a fresh Timeline from Google "
+            f"Maps into ~/Downloads and re-run ingest to geotag them.{RESET}"
+        )
+        print()
+
     if timeline is None:
-        print(f"{BOLD}Timeline export:{RESET} {YELLOW}not found in ~/Downloads/{RESET}")
+        print(
+            f"{BOLD}Timeline export:{RESET} {YELLOW}not found in ~/Downloads/ "
+            f"(looked for {' or '.join(TIMELINE_GLOBS)}){RESET}"
+        )
     elif timeline_start is None or timeline_end is None:
         print(
             f"{BOLD}Timeline export:{RESET} {timeline.name}  "
@@ -484,11 +545,11 @@ def main() -> int:
     if timeline is not None:
         timeline_start, timeline_end = timeline_range(timeline)
 
-    # Per-batch coverage for new photos. A multi-month ingest can end up with
-    # one month covered by the Timeline export and another not, so we decide
-    # batch-by-batch rather than all-or-nothing.
+    # Per-day coverage for new photos. One ingest can span days the Timeline
+    # export covers and days it doesn't, so we decide folder-by-folder rather
+    # than all-or-nothing.
     new_batch_plans = []  # (dest_dir, files, min_date, max_date, will_geotag)
-    for (year, month), files in sorted(group_by_month(new_photos).items()):
+    for (year, month, day), files in sorted(group_by_day(new_photos).items()):
         pmin = min(f.mtime.date() for f in files)
         pmax = max(f.mtime.date() for f in files)
         will_geotag = (
@@ -496,9 +557,12 @@ def main() -> int:
             and timeline is not None
             and covers(timeline_start, timeline_end, pmin, pmax)
         )
-        new_batch_plans.append((photo_dests[(year, month)], files, pmin, pmax, will_geotag))
+        new_batch_plans.append(
+            (photo_dests[(year, month, day)], files, pmin, pmax, will_geotag)
+        )
 
-    # Pending batches from previous ingests that didn't geotag.
+    # Pending folders from previous ingests that didn't geotag (includes any
+    # older "Batch N" folders still carrying a marker).
     pending_plans = []  # (batch_dir, min_date, max_date, will_geotag)
     for batch in find_pending_batches(dest_root):
         pmin, pmax = batch_photo_dates(batch)
@@ -553,7 +617,7 @@ def main() -> int:
         width = len(str(total))
         for i, f in enumerate(all_new, start=1):
             dst_dir = (
-                photo_dests[(f.year, f.month)]
+                photo_dests[(f.year, f.month, f.day)]
                 if f.is_photo
                 else video_dests[(f.year, f.month)]
             )
@@ -572,7 +636,7 @@ def main() -> int:
             f"{GREEN}{BOLD}Imported {len(new_photos)} photos and {len(new_videos)} videos.{RESET}"
         )
 
-        # Mark any new photo batch that's not being geotagged this run, so it
+        # Mark any new photo folder that's not being geotagged this run, so it
         # gets picked up on a later ingest when a covering Timeline export exists.
         for dest_dir, _, _, _, will_geotag in new_batch_plans:
             if not will_geotag:
