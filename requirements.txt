@@ -1,5 +1,3 @@
-piexif==1.1.3  # https://github.com/hMatoba/Piexif
-Pillow==9.5.0  # https://github.com/python-pillow/Pillow
 PyExifTool==0.5.6  # https://github.com/sylikc/pyexiftool
-py-spy==0.3.14  # https://github.com/benfred/py-spy
-timezonefinder>=6.5.0  # https://github.com/jannikmi/timezonefinder
+py-spy==0.4.2  # https://github.com/benfred/py-spy (profiling only)
+timezonefinder>=8.3.0  # https://github.com/jannikmi/timezonefinder
