@@ -39,6 +39,10 @@ TIMELINE_GLOBS = ("location-history*.json", "Timeline*.json")
 
 PENDING_MARKER = ".needs-geotag"
 
+# How far apart two mtimes can be and still count as the same file when
+# matching SD card files against the destination (see index_destination).
+MTIME_TOLERANCE_SECONDS = 24 * 60 * 60
+
 # Photos taken after midnight but before this hour are filed with the previous
 # day, so a shoot that runs past midnight stays in one folder.
 DAY_ROLLOVER_HOUR = 4
@@ -67,6 +71,7 @@ class MediaFile:
         self.name = path.name
         stat = path.stat()
         self.size = stat.st_size
+        self.mtime_epoch = stat.st_mtime
         # The camera stamps files with its wallclock, which macOS exposes as the
         # correct instant. Reading it in the Mac's local timezone gives back that
         # wallclock (as long as camera and Mac share a timezone), which is what
@@ -155,20 +160,37 @@ def resolve_destination() -> Tuple[Path, bool]:
     return MAC_FALLBACK, False
 
 
-def index_destination(dest_root: Path) -> set:
-    # Match by (filename, capture date). Filename alone isn't robust because Sony
-    # rolls over after DSC09999, so the same name can recur years apart. Pairing
-    # with the file's mtime distinguishes a rollover collision from a true
-    # duplicate. The mtime is preserved across our copy (shutil.copystat) and
-    # across geotagging (exiftool's -P flag), so it stays stable end-to-end.
-    known = set()
+def index_destination(dest_root: Path) -> dict:
+    """Map filename -> list of mtimes (epoch seconds) for everything already imported.
+
+    Filename alone isn't robust because Sony rolls over after DSC09999, so the
+    same name can recur years apart. Pairing with the file's mtime distinguishes
+    a rollover collision from a true duplicate. The mtime is preserved across our
+    copy (shutil.copystat) and across geotagging (exiftool's -P flag).
+
+    Matching is done with a tolerance (see is_known) rather than exact equality:
+    the SD card is exFAT, and macOS reads its timestamps as wallclock in the
+    Mac's *current* timezone. Ingest in one zone, then re-read the card after
+    travelling home, and every file on the card shifts by the zone difference
+    while the SSD copies (APFS, stored as instants) stay put. Near midnight that
+    is enough to make an already-imported photo look new.
+    """
+    known: dict = {}
     for sub in [dest_root / "RAW", dest_root / "Video"]:
         if not sub.exists():
             continue
         for p in sub.rglob("*"):
             if p.is_file():
-                known.add((p.name, file_mtime(p).date()))
+                known.setdefault(p.name, []).append(p.stat().st_mtime)
     return known
+
+
+def is_known(f: MediaFile, known: dict) -> bool:
+    """True if a file with this name and a close-enough mtime is already imported."""
+    return any(
+        abs(f.mtime_epoch - t) <= MTIME_TOLERANCE_SECONDS
+        for t in known.get(f.name, ())
+    )
 
 
 def find_timeline_file() -> Optional[Path]:
@@ -322,6 +344,17 @@ def copy_with_verify(src: Path, dst: Path) -> None:
     shutil.copystat(src, dst)
 
 
+def human_size(num_bytes: int) -> str:
+    """Decimal units, to match what Finder shows."""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if num_bytes < 1000 or unit == "TB":
+            break
+        num_bytes /= 1000
+    if unit == "B":
+        return f"{num_bytes:.0f} {unit}"
+    return f"{num_bytes:.1f} {unit}"
+
+
 def relative_date_suffix(d: date) -> str:
     today = datetime.now().date()
     if d == today:
@@ -341,18 +374,19 @@ def date_range_label(files: List[MediaFile]) -> str:
 
 
 def print_per_date_breakdown(
-    label: str, files: List[MediaFile], known: set
+    label: str, files: List[MediaFile], known: dict
 ) -> None:
     if not files:
         return
     by_date: dict = {}
     for f in files:
         by_date.setdefault(f.shoot_date, []).append(f)
-    print(f"{BOLD}{label} by date:{RESET}")
+    total_size = human_size(sum(f.size for f in files))
+    print(f"{BOLD}{label} by date:{RESET}  {FAINT}{total_size} on SD{RESET}")
     for d in sorted(by_date.keys()):
         items = by_date[d]
         total = len(items)
-        new = sum(1 for f in items if (f.name, f.mtime.date()) not in known)
+        new = sum(1 for f in items if not is_known(f, known))
         already = total - new
         suffix = relative_date_suffix(d)
         if new == 0:
@@ -434,7 +468,7 @@ def print_analysis(
     videos: List[MediaFile],
     dest_root: Path,
     dest_mounted: bool,
-    known: set,
+    known: dict,
     new_photos: List[MediaFile],
     new_videos: List[MediaFile],
     new_batch_plans: list,
@@ -445,6 +479,24 @@ def print_analysis(
     timeline_end: Optional[datetime],
     no_geotag_flag: bool,
 ) -> None:
+    if timeline is None:
+        print(
+            f"{BOLD}Timeline export:{RESET} {YELLOW}not found in ~/Downloads/ "
+            f"(looked for {' or '.join(TIMELINE_GLOBS)}){RESET}"
+        )
+    elif timeline_start is None or timeline_end is None:
+        print(
+            f"{BOLD}Timeline export:{RESET} {timeline.name}  "
+            f"{YELLOW}(could not read time range){RESET}"
+        )
+    else:
+        end_suffix = relative_date_suffix(timeline_end.date())
+        print(f"{BOLD}Timeline export:{RESET} {timeline.name}")
+        print(
+            f"  Coverage: {timeline_start.date()} → {timeline_end.date()}{end_suffix}"
+        )
+    print()
+
     print(f"{BOLD}SD card:{RESET}     {sd.name} ({sd})")
     print(f"  Photos:    {len(photos)} files, {date_range_label(photos)}")
     print(f"  Videos:    {len(videos)} files, {date_range_label(videos)}")
@@ -502,23 +554,6 @@ def print_analysis(
         )
         print()
 
-    if timeline is None:
-        print(
-            f"{BOLD}Timeline export:{RESET} {YELLOW}not found in ~/Downloads/ "
-            f"(looked for {' or '.join(TIMELINE_GLOBS)}){RESET}"
-        )
-    elif timeline_start is None or timeline_end is None:
-        print(
-            f"{BOLD}Timeline export:{RESET} {timeline.name}  "
-            f"{YELLOW}(could not read time range){RESET}"
-        )
-    else:
-        end_suffix = relative_date_suffix(timeline_end.date())
-        print(f"{BOLD}Timeline export:{RESET} {timeline.name}")
-        print(
-            f"  Coverage: {timeline_start.date()} → {timeline_end.date()}{end_suffix}"
-        )
-    print()
 
 
 def main() -> int:
@@ -534,8 +569,8 @@ def main() -> int:
 
     dest_root, dest_mounted = resolve_destination()
     known = index_destination(dest_root)
-    new_photos = [f for f in photos if (f.name, f.mtime.date()) not in known]
-    new_videos = [f for f in videos if (f.name, f.mtime.date()) not in known]
+    new_photos = [f for f in photos if not is_known(f, known)]
+    new_videos = [f for f in videos if not is_known(f, known)]
 
     photo_dests = determine_photo_destinations(new_photos, dest_root)
     video_dests = determine_video_destinations(new_videos, dest_root)
